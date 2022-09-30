@@ -101,6 +101,7 @@
                 "downloads/*"
             ],
             "service_account_path":"/home/user/.config/cloudplow/service_accounts/",
+            "post_script": "",
             "mover": {
                 "enabled": false,
                 "move_from_remote": "staging:Media",

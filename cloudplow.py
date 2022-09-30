@@ -6,6 +6,7 @@ import sys
 import time
 from logging.handlers import RotatingFileHandler
 from multiprocessing import Process
+import subprocess
 
 import schedule
 
@@ -469,7 +470,7 @@ def do_upload(remote=None):
             notify.send(message="Exception occurred while uploading: ")
 
     log.info("Finished upload")
-
+    do_postscript(uploader_config['post_script'])
 
 @decorators.timed
 def do_sync(use_syncer=None):
@@ -691,6 +692,17 @@ def do_plex_monitor():
     log.info("Finished monitoring Plex stream(s)!")
     plex_monitor_thread = None
 
+    def do_postscript(script):
+        if os.path.isfile(script) == False:
+            log.error("Script file does not exist")
+        else:
+            log.info("Script File: %s is running", script)
+            try:
+                subprocess.call(script)
+                log.error("Script Finished")
+
+            except:
+                log.error("Please Make sure your script has a shell, and is properly formated")
 
 ############################################################
 # SCHEDULED FUNCS
