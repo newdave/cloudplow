@@ -159,6 +159,7 @@ class Config(object):
                     '/downloads/'
                 ],
                 'exclude_open_files': True,
+                'postscript': '/opt/scripts/personal/cloudplow-post.sh',
                 'schedule': {
                     'enabled': False,
                     'allowed_from': '04:00',

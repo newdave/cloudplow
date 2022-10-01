@@ -692,17 +692,16 @@ def do_plex_monitor():
     log.info("Finished monitoring Plex stream(s)!")
     plex_monitor_thread = None
 
-    def do_postscript(script):
-        if os.path.isfile(script) == False:
-            log.error("Script file does not exist")
-        else:
-            log.info("Script File: %s is running", script)
-            try:
-                subprocess.call(script)
-                log.error("Script Finished")
-
-            except:
-                log.error("Please Make sure your script has a shell, and is properly formated")
+def do_postscript(script):
+    if os.path.isfile(script) == False:
+        log.error("Script file does not exist")
+    else:
+        log.info("Script File: %s is running", script)
+        try:
+            subprocess.call(script)
+            log.error("Script Finished")
+        except:
+            log.error("Please Make sure your script has a shell, and is properly formatted")
 
 ############################################################
 # SCHEDULED FUNCS
