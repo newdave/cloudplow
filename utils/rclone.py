@@ -44,7 +44,7 @@ class RcloneMover:
             if self.plex.get('enabled'):
                 r = re.compile(r"https?://(www\.)?")
                 rc_url = r.sub('', self.plex['rclone']['url']).strip().strip('/')
-                cmd += f' --rc --rc-addr={cmd_quote(rc_url)}'
+                cmd += f' --rc --rc-no-auth --rc-addr={cmd_quote(rc_url)}'
             if self.dry_run:
                 cmd += ' --dry-run'
 
@@ -217,7 +217,7 @@ class RcloneUploader:
             if self.plex.get('enabled'):
                 r = re.compile(r"https?://(www\.)?")
                 rc_url = r.sub('', self.plex['rclone']['url']).strip().strip('/')
-                cmd += f' --rc --rc-addr={cmd_quote(rc_url)}'
+                cmd += f' --rc --rc-no-auth --rc-addr={cmd_quote(rc_url)}'
             if self.dry_run:
                 cmd += ' --dry-run'
 
