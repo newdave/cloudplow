@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+#MISE description="Restart the cloudplow service, only when no upload is running"
+#USAGE flag "--force" help="Restart even during an upload (rclone is stopped mid-transfer)"
+#USAGE flag "--wait" help="Wait for the running upload to finish, then restart"
+set -euo pipefail
+# shellcheck source=../../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+unit=$(service_name) || die "no cloudplow systemd service found"
+
+if upload_running; then
+    if [[ ${usage_wait:-false} == true ]]; then
+        note "Waiting for the running upload to finish..."
+        while upload_running; do sleep 10; done
+    elif [[ ${usage_force:-false} != true ]]; then
+        die "an upload is running; use --wait to restart after it, or --force to interrupt it"
+    fi
+fi
+note "Restarting $unit (cloudplow reads config.json only at startup)"
+sudo systemctl restart "$unit"
+sleep 3
+systemctl is-active --quiet "$unit" || { journalctl -u "$unit" -n 20 --no-pager; die "$unit did not start"; }
+note "$unit is running"
+tail -n 5 cloudplow.log 2>/dev/null || true

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#MISE description="Follow cloudplow.log, optionally only errors or one remote"
+#USAGE flag "--errors" help="Only warnings and errors"
+#USAGE flag "--remote <remote>" help="Only lines mentioning this remote"
+#USAGE flag "-n --lines <lines>" help="Lines of history to show first" default="50"
+#USAGE flag "--no-follow" help="Print and exit instead of following"
+set -euo pipefail
+# shellcheck source=../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+log=$ROOT/cloudplow.log
+[[ -r $log ]] || die "no log at $log"
+
+filter() {
+    local pattern='.'
+    [[ ${usage_errors:-false} == true ]] && pattern=' - (WARNING|ERROR|CRITICAL) '
+    if [[ -n ${usage_remote:-} ]]; then
+        grep --line-buffered -E "$pattern" | grep --line-buffered -F -- "$usage_remote"
+    else
+        grep --line-buffered -E "$pattern"
+    fi
+}
+
+if [[ ${usage_no_follow:-false} == true ]]; then
+    filter < "$log" | tail -n "${usage_lines:?}"
+else
+    # history first (filtered), then follow new lines across log rotation
+    filter < "$log" | tail -n "${usage_lines:?}" || true
+    tail -n 0 -F "$log" 2>/dev/null | filter
+fi

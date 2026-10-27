@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#MISE description="List upstream l3uddz/cloudplow commits not in this branch, and whether they merge cleanly"
+#USAGE flag "--url <url>" help="Upstream repository" default="https://github.com/l3uddz/cloudplow"
+#USAGE flag "--branch <branch>" help="Upstream branch" default="master"
+set -euo pipefail
+# shellcheck source=../../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+
+url=${usage_url:?} branch=${usage_branch:?}
+git fetch --quiet --no-tags "$url.git" "$branch"
+count=$(git rev-list --count HEAD..FETCH_HEAD)
+if (( count == 0 )); then
+    note "Up to date with $url ($branch)"
+    exit 0
+fi
+note "$count upstream commit(s) not in $(git rev-parse --abbrev-ref HEAD):"
+git log --reverse --format='  %h %as %s (%an)' HEAD..FETCH_HEAD
+
+# a merge computed in memory: the working tree and index are not touched
+if result=$(git merge-tree --write-tree --name-only --no-messages HEAD FETCH_HEAD); then
+    note "They merge cleanly: git pull --no-rebase $url $branch"
+else
+    note "Merging them conflicts in:"
+    tail -n +2 <<<"$result" | sed '/^$/d; s/^/  /'
+    exit 1
+fi

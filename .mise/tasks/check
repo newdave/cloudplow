@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#MISE description="Everything CI checks: lint, tests, and no coverage drop against the base branch"
+#MISE depends=["lint"]
+#USAGE flag "--base <ref>" help="Compare coverage with this ref" default="origin/master"
+set -euo pipefail
+# shellcheck source=../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+need_venv
+"$PY" -c 'import coverage' 2>/dev/null || die "coverage is not installed; run: mise run setup"
+make_scratch
+
+note "Tests with coverage"
+"$PY" -m coverage run --data-file="$SCRATCH/head.cov" -m unittest discover -s tests
+"$PY" -m coverage json --data-file="$SCRATCH/head.cov" -q -o "$SCRATCH/head.json"
+
+base=${usage_base:?}
+git fetch --quiet origin 2>/dev/null || true
+note "Coverage of $base (same .coveragerc)"
+git worktree add --quiet --detach "$SCRATCH/base" "$base"
+trap 'git worktree remove --force "$SCRATCH/base" 2>/dev/null; rm -rf "$SCRATCH"' EXIT
+cp .coveragerc "$SCRATCH/base/.coveragerc"
+if (cd "$SCRATCH/base" && "$PY" -m coverage run --data-file="$SCRATCH/base.cov" -m unittest discover -s tests \
+        >/dev/null 2>&1 && "$PY" -m coverage json --data-file="$SCRATCH/base.cov" -q -o "$SCRATCH/base.json"); then
+    "$PY" .github/scripts/coverage-gate.py "$SCRATCH/head.json" "$SCRATCH/base.json"
+else
+    echo "Could not measure $base; reporting this tree only"
+    "$PY" .github/scripts/coverage-gate.py "$SCRATCH/head.json"
+fi

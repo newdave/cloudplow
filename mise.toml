@@ -1,0 +1,7 @@
+# Developer and operations tasks for Cloudplow: `mise tasks` lists them, `mise run <task> --help` explains one.
+# The tasks live in .mise/tasks/; .mise/lib.sh holds what they share.
+
+[tools]
+# for `mise run lint` / `mise run check` (CI uses the runner's shellcheck)
+shellcheck = "0.11.0"
+actionlint = "1.7.12"

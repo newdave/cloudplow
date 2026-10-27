@@ -58,6 +58,20 @@ Cloudplow supports Python 3.8 and later, so avoid syntax and standard library fe
 
 6. Push your branch and open a pull request against `master`.
 
+## Repository settings (maintainers)
+
+CI and the workflows rely on three GitHub settings: the `CI gate` check required on `master` (as a ruleset that
+repository admins may bypass, so they can still push directly), GitHub Actions being allowed to create pull requests
+(for the Upstream Sync workflow), and private vulnerability reporting (linked from `SECURITY.md`). With
+[mise](https://mise.jdx.dev/) and an authenticated `gh`:
+
+```
+mise run github:settings status
+mise run github:settings enable --dry-run   # show the changes first
+mise run github:settings enable             # add --strict to require the gate for admins too
+mise run github:settings disable
+```
+
 ## Guidelines
 
 - Match the surrounding code: type hints, `logging.getLogger(__name__)`, and external commands built as argument lists

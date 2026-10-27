@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#MISE description="Show what cloudplow is doing: service, upload in progress, last results, rate limits"
+set -euo pipefail
+# shellcheck source=../../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+
+if unit=$(service_name); then
+    echo "Service:   $unit is $(systemctl is-active "$unit") since $(systemctl show "$unit" -p ActiveEnterTimestamp --value)"
+else
+    echo "Service:   none installed"
+fi
+echo "Upload:    $(upload_running && echo 'in progress' || echo idle)"
+echo "Commit:    $(git log -1 --format='%h %s')"
+
+log=$ROOT/cloudplow.log
+if [[ -r $log ]]; then
+    echo
+    echo "Last result per remote:"
+    { grep -E "Finished uploading to remote|Upload (completed|not completed) successfully|Upload aborted|skipped because required mount" "$log" || true; } |
+        awk '{
+            remote = $NF
+            if (match($0, /remote: [^ ]+/)) remote = substr($0, RSTART + 8, RLENGTH - 8)
+            else if (match($0, /uploader: [^ ]+/)) remote = substr($0, RSTART + 10, RLENGTH - 10)
+            else if (match($0, /Upload to [^ ]+/)) remote = substr($0, RSTART + 10, RLENGTH - 10)
+            sub(/,$/, "", remote)
+            msg = $0; sub(/^.* - /, "", msg)
+            last[remote] = $1 " " substr($2, 1, 8) "  " msg
+        } END { for (r in last) printf "  %-14s %s\n", r, last[r] }' | sort
+    limit=$( { grep -E "Upload bandwidth limit is now|Load-based upload limit changed" "$log" || true; } |
+        tail -n 1 | sed 's/^\([^,]*\),[^ ]* .* - /\1  /')
+    echo
+    echo "Last rate limit change: ${limit:-none logged}"
+fi
+
+echo
+echo "Overrides (applied at the start of each upload):"
+shopt -s nullglob
+files=("$ROOT"/overrides/*.json)
+if (( ${#files[@]} )); then
+    for f in "${files[@]}"; do printf '  %-14s %s\n' "$(basename "$f" .json)" "$(cat "$f")"; done
+else
+    echo "  none"
+fi

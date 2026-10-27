@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+#MISE description="Run 'sb install cloudplow' after checking it cannot lose work or install the wrong repo"
+#USAGE flag "--dry-run" help="Only run the checks"
+#USAGE flag "--wait" help="Wait for a running upload to finish first"
+#USAGE flag "--force" help="Install even during an upload"
+#USAGE flag "--inventory <file>" help="Saltbox inventory holding cloudplow_git_repo_url" default="/srv/git/saltbox/inventories/host_vars/localhost.yml"
+#
+# Saltbox's cloudplow role force-checks-out the configured branch into this folder, so anything
+# not on that branch on GitHub is lost. config.json, post_script.conf and overrides/ are untracked
+# and survive.
+set -euo pipefail
+# shellcheck source=../../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+command -v sb >/dev/null || die "Saltbox's 'sb' command was not found"
+problems=0
+fail() { echo "  FAIL: $*"; problems=$((problems + 1)); }
+pass() { echo "  ok:   $*"; }
+
+note "Checking $ROOT"
+if [[ -n $(git status --porcelain --untracked-files=no) ]]; then
+    fail "uncommitted changes to tracked files (Saltbox would discard them):"
+    git status --short --untracked-files=no | sed 's/^/          /'
+else
+    pass "no uncommitted changes to tracked files"
+fi
+untracked=$(git status --porcelain | grep '^??' || true)
+if [[ -n $untracked ]]; then
+    echo "  note: untracked files survive the install, but are not saved anywhere:"
+    while IFS= read -r line; do echo "          $line"; done <<<"$untracked"
+fi
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+git fetch --quiet origin "$branch" || fail "could not fetch origin/$branch"
+read -r ahead behind < <(git rev-list --left-right --count "HEAD...origin/$branch")
+if (( ahead > 0 )); then
+    fail "$ahead local commit(s) not on origin/$branch (push them first, or Saltbox drops them)"
+else
+    pass "every local commit is on origin/$branch"
+fi
+(( behind == 0 )) || echo "  note: origin/$branch is $behind commit(s) ahead; the install updates to it"
+
+origin=$(git remote get-url origin | sed -E 's#(\.git)?/*$##')
+inventory=${usage_inventory:?}
+configured=$( { grep -E '^cloudplow_git_repo_url:' "$inventory" 2>/dev/null || true; } | sed -E 's/^[^:]+:[[:space:]]*//; s/^["'"'"']//; s/["'"'"'][[:space:]]*$//; s#(\.git)?/*$##')
+if [[ -z $configured ]]; then
+    fail "$inventory does not set cloudplow_git_repo_url: Saltbox would install upstream l3uddz/cloudplow"
+elif [[ $configured != "$origin" ]]; then
+    fail "Saltbox installs $configured, but this checkout's origin is $origin"
+else
+    pass "Saltbox installs this fork ($configured)"
+fi
+
+if upload_running; then
+    if [[ ${usage_wait:-false} == true && ${usage_dry_run:-false} != true ]]; then
+        note "Waiting for the running upload to finish..."
+        while upload_running; do sleep 10; done
+        pass "upload finished"
+    elif [[ ${usage_force:-false} == true ]]; then
+        echo "  note: an upload is running and will be interrupted (--force)"
+    else
+        fail "an upload is running (use --wait, or --force to interrupt it)"
+    fi
+else
+    pass "no upload running"
+fi
+
+(( problems == 0 )) || die "$problems check(s) failed; nothing was installed"
+if [[ ${usage_dry_run:-false} == true ]]; then
+    note "All checks passed (dry run: not installing)"
+    exit 0
+fi
+note "Running: sb install cloudplow"
+sb install cloudplow

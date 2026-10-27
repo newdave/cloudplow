@@ -17,7 +17,9 @@ export CLOUDPLOW_POST_CONF_LOADED=1
 
 rc=0
 for part in "$here"/post.d/*; do
-    [ -f "$part" ] && [ -x "$part" ] || continue
+    if [ ! -f "$part" ] || [ ! -x "$part" ]; then
+        continue
+    fi
     "$part" || { echo "post.d/$(basename "$part") failed with exit code $?"; rc=1; }
 done
 exit "$rc"

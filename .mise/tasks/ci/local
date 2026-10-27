@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#MISE description="Run the CI test job in Docker: official python image, unprivileged user, rclone installed"
+#USAGE flag "--python <version>" help="Python image version" default="3.8"
+#USAGE flag "--as-root" help="Run as root without rclone instead (tests needing either are skipped)"
+set -euo pipefail
+# shellcheck source=../../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+command -v docker >/dev/null || die "docker is required"
+make_scratch
+
+# tracked and new (not ignored) files: what a push of this tree would test; no config.json, venv or secrets
+git ls-files -co --exclude-standard -z | grep -zv '^venv/' | tar --null -T - -cf - | tar -xf - -C "$SCRATCH"
+
+if [[ ${usage_as_root:-false} == true ]]; then
+    steps='pip install -q --root-user-action=ignore -r requirements.txt
+           python -m unittest discover -s tests'
+else
+    steps='apt-get update -qq && apt-get install -y -qq --no-install-recommends rclone lsof >/dev/null
+           pip install -q --root-user-action=ignore -r requirements.txt
+           useradd --create-home tester && chown -R tester .
+           su tester -c "python -m unittest discover -s tests"'
+fi
+python_version=${usage_python:?}
+note "python:$python_version $([[ ${usage_as_root:-false} == true ]] && echo 'as root, no rclone' || echo 'unprivileged, with rclone')"
+docker run --rm -v "$SCRATCH:/src:ro" "python:$python_version" bash -ec "cp -r /src /w && cd /w
+$steps"

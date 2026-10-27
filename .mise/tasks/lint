@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="ShellCheck the shell scripts and actionlint the GitHub workflows"
+set -euo pipefail
+# shellcheck source=../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+
+mapfile -t files < <(shell_files)
+note "shellcheck (${#files[@]} files)"
+shellcheck "${files[@]}"
+note "actionlint"
+actionlint
+note "Lint clean"

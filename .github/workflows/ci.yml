@@ -66,12 +66,14 @@ jobs:
             python .github/scripts/coverage-gate.py /tmp/head.json
           fi
 
+  # the same pinned ShellCheck and actionlint as `mise run lint` (mise.toml), so local and CI results match
   shellcheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: ShellCheck bundled scripts
-        run: shellcheck scripts/post_script/post.sh scripts/post_script/post.d/* .github/scripts/*.sh
+      - uses: jdx/mise-action@v2
+      - name: Lint (ShellCheck and actionlint)
+        run: mise run lint
 
   # the one check to require in branch protection: passes only when every job above passed
   gate:

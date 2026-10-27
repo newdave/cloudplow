@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#MISE description="Test the NAS SSH key the load tuner uses, exactly as the service runs it (no SSH agent)"
+set -euo pipefail
+# shellcheck source=../../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+load_post_conf
+[[ -n ${NAS_SSH:-} ]] || die "NAS_SSH is not set in post_script.conf"
+
+args=(-p "${NAS_SSH_PORT:-22}" -o BatchMode=yes -o ConnectTimeout=5)
+if [[ -n ${NAS_SSH_KEY:-} ]]; then
+    [[ -r $NAS_SSH_KEY ]] || die "NAS_SSH_KEY $NAS_SSH_KEY is not readable"
+    args+=(-i "$NAS_SSH_KEY" -o IdentitiesOnly=yes)
+fi
+nas() { env -u SSH_AUTH_SOCK timeout 15 ssh "${args[@]}" "$NAS_SSH" "$@" 2>&1; }
+
+note "Reading the load from $NAS_SSH (port ${NAS_SSH_PORT:-22}) without an agent"
+if ! out=$(nas 'cat /proc/loadavg; grep -c ^processor /proc/cpuinfo'); then
+    echo "$out"
+    die "login failed: install the public key on the NAS (see README, 'Bundled scripts')"
+fi
+load=$(sed -n 1p <<<"$out"); cpus=$(sed -n 2p <<<"$out")
+[[ $load =~ ^[0-9.]+\ [0-9.]+\ [0-9.]+ && $cpus =~ ^[0-9]+$ ]] || die "unexpected reply: $out"
+echo "  ok:   load averages ${load%% [0-9]*/*} on $cpus CPUs"
+
+note "Checking the key is restricted to that command"
+if [[ $(nas 'echo unrestricted-shell') == *unrestricted-shell* ]]; then
+    echo "  WARN: this key can run any command on the NAS; restrict it in authorized_keys with:"
+    echo "        command=\"cat /proc/loadavg; grep -c ^processor /proc/cpuinfo\",restrict"
+    exit 1
+fi
+echo "  ok:   other commands are refused (forced command in place)"

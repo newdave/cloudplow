@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#MISE description="Show what update_config (run by Saltbox on every install) would change in config.json"
+#USAGE arg "[config]" help="Config file to check (default: config.json)"
+set -euo pipefail
+# shellcheck source=../../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+need_venv
+config=${usage_config:-$ROOT/config.json}
+[[ -r $config ]] || die "no config at $config"
+make_scratch
+
+cp "$config" "$SCRATCH/before.json"
+cp "$config" "$SCRATCH/config.json"
+# a copy, with its own log and cache: the real config, log and cache are never touched
+"$PY" cloudplow.py --config "$SCRATCH/config.json" --logfile "$SCRATCH/cloudplow.log" \
+    --cachefile "$SCRATCH/cache.db" update_config >/dev/null 2>&1 || die "update_config failed: $(tail -n 5 "$SCRATCH/cloudplow.log")"
+
+"$PY" - "$SCRATCH/before.json" "$SCRATCH/config.json" <<'PY'
+import json, sys
+
+def flat(value, prefix=''):
+    if isinstance(value, dict) and value:
+        out = {}
+        for key, child in value.items():
+            out.update(flat(child, f'{prefix}{key}.'))
+        return out
+    return {prefix.rstrip('.'): value}
+
+before, after = (flat(json.load(open(p))) for p in sys.argv[1:3])
+added = sorted(set(after) - set(before))
+removed = sorted(set(before) - set(after))
+changed = sorted(k for k in set(before) & set(after) if before[k] != after[k])
+if not (added or removed or changed):
+    print("config.json is up to date: update_config would change nothing")
+for key in added:
+    print(f"  + {key} = {json.dumps(after[key])}")
+for key in changed:
+    print(f"  ~ {key}: {json.dumps(before[key])} -> {json.dumps(after[key])}")
+for key in removed:
+    print(f"  - {key} (would be REMOVED)")
+sys.exit(1 if removed else 0)
+PY

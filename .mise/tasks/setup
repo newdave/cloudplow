@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#MISE description="Create venv/ and install the runtime and development requirements"
+#USAGE flag "--python <python>" help="Interpreter for a new venv (default: python3)" default="python3"
+set -euo pipefail
+# shellcheck source=../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+
+if [[ ! -x $PY ]]; then
+    note "Creating venv/ with ${usage_python:?}"
+    "${usage_python:?}" -m venv venv
+fi
+note "Installing requirements into venv/ ($("$PY" --version))"
+"$PY" -m pip install --quiet --upgrade pip
+"$PY" -m pip install --quiet -r requirements.txt -r requirements-dev.txt
+note "Done"

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#MISE description="Show the load readings and the --transfers/--bwlimit the load tuner would choose now"
+#USAGE arg "[remote]" help="Remote to evaluate (default: any)"
+#USAGE flag "--local" help="Ignore the NAS and decide from this host's load only"
+set -euo pipefail
+# shellcheck source=../../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+load_post_conf
+[[ ${usage_local:-false} != true ]] || NAS_SSH=""
+make_scratch
+
+echo "Tiers (max load per CPU : transfers : bwlimit): ${TUNE_TIERS:-0.50:6:off 0.80:4:off 1.20:2:200M 999:1:50M}"
+echo "Load window: ${TUNE_LOAD_WINDOW:-5} min   NAS: ${NAS_SSH:-not configured}"
+echo
+remote=${usage_remote:-}
+# dry run into a fresh file, so the decision is always printed and nothing real is written
+# without a remote, ignore TUNE_REMOTES so the decision is always shown
+env CLOUDPLOW_POST_CONF_LOADED=1 TUNE_REMOTES="${remote:+${TUNE_REMOTES:-}}" \
+    CLOUDPLOW_REMOTE="${remote:-any}" CLOUDPLOW_STATUS=success CLOUDPLOW_DRY_RUN=1 \
+    CLOUDPLOW_CONFIG_DIR="$ROOT" CLOUDPLOW_OVERRIDES_FILE="$SCRATCH/overrides.json" \
+    "$ROOT/scripts/post_script/post.d/10-tune-load" | sed 's/^Dry run: /Now: /; s/ (not written)$//'
+[[ -z $remote || -z ${TUNE_REMOTES:-} || " $TUNE_REMOTES " == *" $remote "* ]] \
+    || echo "($remote is not in TUNE_REMOTES, so it is never tuned)"
+
+echo
+echo "Current overrides:"
+shopt -s nullglob
+files=("$ROOT"/overrides/*.json)
+(( ${#files[@]} )) || echo "  none"
+for f in "${files[@]}"; do printf '  %-14s %s\n' "$(basename "$f" .json)" "$(cat "$f")"; done
