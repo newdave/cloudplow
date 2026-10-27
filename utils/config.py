@@ -153,6 +153,7 @@ class Config:
                     '/downloads/'
                 ],
                 'exclude_open_files': True,
+                'post_script': '',
                 'schedule': {
                     'enabled': False,
                     'allowed_from': '04:00',

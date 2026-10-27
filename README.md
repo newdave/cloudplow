@@ -795,6 +795,8 @@ In the example above, the uploader references `"google"` from the `remotes` sect
 
 `"service_account_path"`: Path that will be scanned for Google Drive service account keys (\*.json) to be used when performing upload operations.
 
+`"post_script"`: Path to an executable (with a shebang line) that is run after each upload to this remote finishes, whether or not the upload succeeded. Leave empty (`""`) to disable.
+
   - This is currently not supported with sync operations.
 
 ### Mover

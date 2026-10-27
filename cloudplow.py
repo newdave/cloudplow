@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 import schedule
 
-from utils import config, decorators, lock, logs, misc, version
+from utils import config, decorators, lock, logs, misc, process, version
 from utils.cache import Cache
 from utils.notifications import Notifications
 from utils.nzbget import Nzbget
@@ -153,7 +153,25 @@ class Cloudplow:
                 except Exception:
                     log.exception("Exception occurred while uploading to remote: %s", name)
                     self.notify.send(f"Exception occurred while uploading to remote: {name}")
+                self._run_post_script(name, uploader_config.get('post_script', ''))
         log.info("Finished upload")
+
+    @staticmethod
+    def _run_post_script(name: str, script: str) -> None:
+        if not script:
+            return
+        if not os.path.isfile(script):
+            log.error("post_script %r for remote %s does not exist", script, name)
+            return
+        log.info("Running post_script %r for remote: %s", script, name)
+        try:
+            returncode = process.run([script], logs=True).returncode
+        except OSError:
+            # not executable, or no shebang line
+            log.exception("post_script %r could not be executed", script)
+            return
+        log_fn = log.info if returncode == 0 else log.error
+        log_fn("post_script %r finished with exit code %d", script, returncode)
 
     def _upload_remote(self, name: str, uploader_config: Mapping[str, Any]) -> None:
         self.notify.send(f"Upload has begun for remote: {name}")
