@@ -4,7 +4,7 @@ import logging
 import subprocess
 from typing import Callable, Mapping, NamedTuple, Optional, Sequence
 
-log = logging.getLogger("process")
+log = logging.getLogger(__name__)
 
 # Returned by the line callback; True requests that the process is killed.
 LineCallback = Callable[[str], bool]
@@ -16,12 +16,15 @@ class Result(NamedTuple):
 
 
 def stream(args: Sequence[str], callback: Optional[LineCallback] = None,
-           env: Optional[Mapping[str, str]] = None, logs: bool = True) -> Result:
+           env: Optional[Mapping[str, str]] = None, logs: bool = True,
+           logger: Optional[logging.Logger] = None) -> Result:
     """Run a command, handing every output line to `callback` as it arrives.
 
     stderr is merged into stdout. If the callback returns True the process is killed
-    (returncode -9), but remaining buffered output is still drained.
+    (returncode -9), but remaining buffered output is still drained. Output lines are logged
+    to `logger` (default: this module's) and attributed to the function that called stream().
     """
+    out_log = logger or log
     log.debug("Executing: %s", subprocess.list2cmdline(args))
     lines = []
     with subprocess.Popen(list(args), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -32,9 +35,9 @@ def stream(args: Sequence[str], callback: Optional[LineCallback] = None,
                 continue
             lines.append(line)
             if logs:
-                log.info(line)
+                out_log.info(line, stacklevel=2)
             if callback and proc.poll() is None and callback(line):
-                log.info("Callback requested termination, terminating...")
+                out_log.info("Callback requested termination, terminating...", stacklevel=2)
                 proc.kill()
         returncode = proc.wait()
 

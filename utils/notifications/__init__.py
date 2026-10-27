@@ -7,7 +7,7 @@ from .apprise import Apprise
 from .pushover import Pushover
 from .slack import Slack
 
-log = logging.getLogger("notifications")
+log = logging.getLogger(__name__)
 
 SERVICES = {
     'apprise': Apprise,

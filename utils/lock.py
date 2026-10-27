@@ -6,7 +6,7 @@ import os
 import sys
 from typing import IO, Optional
 
-log = logging.getLogger("lock")
+log = logging.getLogger(__name__)
 lock_folder = os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), 'locks')
 
 

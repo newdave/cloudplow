@@ -6,7 +6,7 @@ from typing import Any, List, Mapping, Optional, Tuple
 
 from utils.rclone import RcloneSyncer
 
-log = logging.getLogger("local")
+log = logging.getLogger(__name__)
 
 
 class Local:

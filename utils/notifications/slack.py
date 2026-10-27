@@ -5,7 +5,7 @@ from typing import Optional
 
 import requests
 
-log = logging.getLogger("slack")
+log = logging.getLogger(__name__)
 
 
 class Slack:

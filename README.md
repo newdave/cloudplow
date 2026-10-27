@@ -742,6 +742,10 @@ This is the depth to min-depth to delete empty folders from relative to `upload_
 
 `"upload_remote"`: is the remote path that the `uploader` task will uploaded to.
 
+`"verified_move"`: When `true`, files are uploaded with `rclone copy` and each local file is only removed once the upload is confirmed and the local file is unchanged (same inode, size and modification time) since it was listed. Use this when the destination is also a mergerfs branch (e.g. an NFS mount) so that an app replacing a file mid-upload never loses its new version, and a file deleted or renamed mid-upload leaves no stale copy behind.
+
+`"require_mounts"`: List of mount points that must be mounted before uploading (e.g. `["/mnt/nfs/Media/Movies"]`). If any is not mounted the upload is skipped, so files are never written into an empty mount point on the root filesystem.
+
 #### Sync From/To Paths
 
 `"sync_remote"`: Used by the `syncer` task. This specifies the from/to destinations used to build the Rclone command. See the [syncer](#syncer) section for more on this.
@@ -780,6 +784,8 @@ In the example above, the uploader references `"google"` from the `remotes` sect
 `"check_interval"`: How often (in minutes) to upload this remote's `upload_folder`. Use rclone's `--min-age` in `rclone_extras` to hold back files that are still being written.
 
 `"exclude_open_files"`: When set to `true`, open files will be excluded from the Rclone upload (i.e. upload will occur without them).
+
+`"opened_files_sudo"`: Run the open file check (`lsof`) through passwordless `sudo`. Needed with mergerfs, where files written through the pool are held open by the mergerfs process (root) and are invisible to an unprivileged `lsof`.
 
 `"opened_excludes"`: Paths the open file checker will check for when searching for open files. These are plain substring matches (not globs): in the example above, any open file with `/downloads/` in its path is still uploaded.
 

@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Dict, Mapping, Optional
 
-log = logging.getLogger('triggers')
+log = logging.getLogger(__name__)
 
 
 def _fmt(timestamp: float) -> str:

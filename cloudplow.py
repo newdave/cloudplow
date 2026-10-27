@@ -7,13 +7,12 @@ import os
 import sys
 import threading
 import time
-from logging.handlers import RotatingFileHandler
 from multiprocessing import Process
 from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 import schedule
 
-from utils import config, decorators, lock, misc, version
+from utils import config, decorators, lock, logs, misc, version
 from utils.cache import Cache
 from utils.notifications import Notifications
 from utils.nzbget import Nzbget
@@ -26,24 +25,9 @@ from utils.uploader import Uploader, UploadResult
 
 log = logging.getLogger('cloudplow')
 
-LOG_FORMAT = '%(asctime)s - %(levelname)-10s - %(name)-20s - %(funcName)-30s - %(message)s'
 MOVER_REQUIRED_SETTINGS = ('move_from_remote', 'move_to_remote', 'rclone_extras')
 RCLONE_STARTUP_GRACE_SECONDS = 15
 SECONDS_PER_HOUR = 60 * 60
-
-
-def setup_logging(logfile: str, loglevel: str) -> None:
-    formatter = logging.Formatter(LOG_FORMAT)
-    root_logger = logging.getLogger()
-    for handler in (logging.StreamHandler(sys.stdout),
-                    RotatingFileHandler(logfile, maxBytes=5 * 1024 * 1024, backupCount=5, encoding='utf-8')):
-        handler.setFormatter(formatter)
-        root_logger.addHandler(handler)
-    root_logger.setLevel(loglevel)
-
-    for noisy, level in (('schedule', logging.ERROR), ('requests', logging.WARNING),
-                         ('urllib3', logging.WARNING), ('sqlitedict', logging.WARNING)):
-        logging.getLogger(noisy).setLevel(level)
 
 
 def _format_time(timestamp: float) -> str:
@@ -545,8 +529,10 @@ class Cloudplow:
 
 
 def main() -> int:
+    logs.setup_console()
     conf = config.Config()
-    setup_logging(conf.settings['logfile'], conf.settings['loglevel'])
+    logs.setup_file(conf.settings['logfile'])
+    logs.set_level(conf.settings['loglevel'])
     conf.load()
     version.check_version()
 

@@ -6,7 +6,7 @@ from typing import Any, Dict, Mapping, Optional
 from .local import Local
 from .scaleway import Scaleway
 
-log = logging.getLogger("syncer")
+log = logging.getLogger(__name__)
 
 SERVICES = {
     'scaleway': Scaleway,

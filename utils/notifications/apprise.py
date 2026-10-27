@@ -4,7 +4,7 @@ import logging
 
 import apprise
 
-log = logging.getLogger('apprise')
+log = logging.getLogger(__name__)
 
 
 class Apprise:

@@ -7,7 +7,7 @@ from typing import Any, List, Mapping, Optional, Tuple
 from . import path
 from .rclone import RcloneUploader
 
-log = logging.getLogger('unionfs')
+log = logging.getLogger(__name__)
 
 HIDDEN_SUFFIX = '_HIDDEN~'
 

@@ -8,7 +8,7 @@ from uuid import getnode
 
 import requests
 
-log = logging.getLogger('plex')
+log = logging.getLogger(__name__)
 
 ACTIVE_STATES = ('playing', 'buffering')
 

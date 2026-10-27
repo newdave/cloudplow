@@ -5,7 +5,7 @@ import xmlrpc.client
 
 from .xmlrpc import server_proxy
 
-log = logging.getLogger('nzbget')
+log = logging.getLogger(__name__)
 
 
 class Nzbget:

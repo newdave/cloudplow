@@ -9,7 +9,7 @@ try:
 except ImportError:
     sys.exit("You are missing the GitPython requirement or executing from the wrong working directory.")
 
-log = logging.getLogger("git")
+log = logging.getLogger(__name__)
 
 
 def check_version() -> None:

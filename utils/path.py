@@ -6,7 +6,7 @@ from typing import Iterable, List, Optional
 
 from . import process
 
-log = logging.getLogger('path')
+log = logging.getLogger(__name__)
 
 
 def find_items(folder: str, suffix: Optional[str] = None, depth: Optional[int] = None,
@@ -27,10 +27,14 @@ def find_items(folder: str, suffix: Optional[str] = None, depth: Optional[int] =
     return sorted(found, key=lambda item: item.count(os.sep), reverse=True)
 
 
-def opened_files(folder: str) -> List[str]:
-    """Return files below `folder` that are currently held open by a process visible to this host."""
+def opened_files(folder: str, sudo: bool = False) -> List[str]:
+    """Return files below `folder` that are currently held open by a process visible to this host.
+
+    Writes made through a mergerfs pool are held open by the mergerfs daemon (root), which an
+    unprivileged lsof cannot see; `sudo` runs lsof via passwordless sudo so they are included.
+    """
     # -F n emits machine-readable records; file names are the lines prefixed with 'n'
-    result = process.run(['lsof', '-w', '-F', 'n', '+D', folder])
+    result = process.run([*(['sudo', '-n'] if sudo else []), 'lsof', '-w', '-F', 'n', '+D', folder])
     names = (line[1:] for line in result.output.splitlines() if line.startswith('n'))
     return sorted({name for name in names if os.path.isfile(name)})
 

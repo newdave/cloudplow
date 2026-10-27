@@ -4,7 +4,7 @@ import logging
 
 import requests
 
-log = logging.getLogger('sabnzbd')
+log = logging.getLogger(__name__)
 
 
 class Sabnzbd:

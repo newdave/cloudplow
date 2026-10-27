@@ -5,7 +5,9 @@ import os
 import sys
 from copy import copy, deepcopy
 
-log = logging.getLogger('config')
+from . import logs
+
+log = logging.getLogger(__name__)
 
 
 class Config:
@@ -113,6 +115,13 @@ class Config:
                     '**_HIDDEN~',
                     '.unionfs/**',
                     '.unionfs-fuse/**',
+                    # files still being written under a temporary name
+                    '.*.{mp4,mkv,m4v,avi,ts,webm}',
+                    '**.version',
+                    '**.version.*',
+                    '**.tmp*',
+                    '**.partial',
+                    '**.part',
                 ],
                 'rclone_extras': {
                     '--drive-chunk-size': '64M',
@@ -172,9 +181,9 @@ class Config:
                     merged[k] = v
                     sub_upgraded = True
                     if not key:
-                        log.info(f"Added {k} config option: {v}")
+                        log.info("Added %s config option: %s", k, v)
                     else:
-                        log.info(f"Added {k} to config option {key}: {v}")
+                        log.info("Added %s to config option %s: %s", k, key, v)
                     continue
 
                 # iterate children
@@ -190,7 +199,7 @@ class Config:
                 if v not in settings2:
                     merged.append(v)
                     sub_upgraded = True
-                    log.info(f"Added to config option {key}: {v}")
+                    log.info("Added to config option %s: %s", key, v)
                     continue
 
         return merged, sub_upgraded
@@ -203,7 +212,7 @@ class Config:
             if name in os.environ:
                 # Use JSON decoder to get same behaviour as config file
                 fields_env[name] = json.JSONDecoder().decode(os.environ[name])
-                log.info(f"Using ENV setting {name}={fields_env[name]}")
+                log.info("Using ENV setting for config section: %s", name)
 
         # Update in-memory config with environment settings
         currents.update(fields_env)
@@ -244,20 +253,20 @@ class Config:
                 # Command line argument
                 if self.args[name]:
                     value = self.args[name]
-                    log.info(f"Using ARG setting {name}={value}")
+                    log.info("Using ARG setting %s=%s", name, value)
 
                 elif data['env'] in os.environ:
                     value = os.environ[data['env']]
-                    log.debug(f"Using ENV setting {data['env']}={value}")
+                    log.debug("Using ENV setting %s=%s", data['env'], value)
 
                 else:
                     value = data['default']
-                    log.debug(f"Using default setting {data['argv']}={value}")
+                    log.debug("Using default setting %s=%s", data['argv'], value)
 
                 setts[name] = value
 
             except Exception:
-                log.exception(f"Exception retrieving setting value: {name}")
+                log.exception("Exception retrieving setting value: %s", name)
 
         return setts
 
@@ -297,7 +306,7 @@ class Config:
                             help=f"Cache file location (default: {self.base_settings['cachefile']['default']})")
 
         # Logging level
-        parser.add_argument(self.base_settings['loglevel']['argv'], choices=('WARN', 'INFO', 'DEBUG'),
+        parser.add_argument(self.base_settings['loglevel']['argv'], choices=logs.LEVELS,
                             help=f"Log level (default: {self.base_settings['loglevel']['default']})")
 
         if len(sys.argv) != 1:

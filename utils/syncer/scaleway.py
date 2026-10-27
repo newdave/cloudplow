@@ -8,7 +8,7 @@ from typing import Any, List, Mapping, Optional, Tuple
 from utils import process
 from utils.rclone import RcloneSyncer
 
-log = logging.getLogger("scaleway")
+log = logging.getLogger(__name__)
 
 BOOT_WAIT_SECONDS = 60
 INSTALL_UNZIP = "apt-get -qq update && apt-get -y -qq install unzip && which unzip"

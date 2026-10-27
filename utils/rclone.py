@@ -12,7 +12,12 @@ import requests
 from . import process
 from .triggers import TriggerTracker
 
-log = logging.getLogger('rclone')
+log = logging.getLogger(__name__)
+
+# rclone filter flags (prefixes); these cannot be combined with --files-from-raw
+FILTER_FLAGS = ('--exclude', '--include', '--filter', '--files-from', '--min-age', '--max-age', '--min-size',
+                '--max-size', '--ignore-case', '--metadata-exclude', '--metadata-include', '--metadata-filter',
+                '--hash-filter', '--max-depth')
 
 # Remote types whose single upstream is stored under the 'remote' key
 _WRAPPING_REMOTE_TYPES = ('crypt', 'chunker', 'alias')
@@ -33,6 +38,13 @@ def rc_args(plex: Optional[Mapping[str, Any]]) -> List[str]:
         return []
     rc_addr = re.sub(r'https?://(www\.)?', '', plex['rclone']['url']).strip().strip('/')
     return ['--rc', '--rc-no-auth', f'--rc-addr={rc_addr}']
+
+
+def join_remote(base: str, relative_path: str) -> str:
+    """Join a path onto an rclone location ('remote:', 'remote:/dir' or a local '/dir')."""
+    if base.endswith(':'):
+        return base + relative_path
+    return f"{base.rstrip('/')}/{relative_path}"
 
 
 def drive_upstreams(remotes: Mapping[str, Mapping[str, str]], name: str) -> List[str]:
@@ -76,7 +88,7 @@ class RcloneMover:
             args.append('--dry-run')
 
         try:
-            return process.stream(args).returncode == 0
+            return process.stream(args, logger=log).returncode == 0
         except OSError:
             log.exception("Exception occurred while moving %r to %r:", source, destination)
         return False
@@ -102,9 +114,14 @@ class RcloneUploader:
         log.debug("Deleting folder %r from remote %s", path, self.name)
         return self._run_delete('rmdir', path, 'Failed to rmdir')
 
-    def upload(self, callback: Callable[[str], bool]) -> Tuple[bool, int]:
-        """Run the configured move/copy; returns (ran, rclone exit code)."""
-        command = self.config.get('rclone_command', 'move')
+    def upload(self, callback: Callable[[str], bool], command: Optional[str] = None,
+               files_from: Optional[str] = None) -> Tuple[bool, int]:
+        """Run the configured move/copy; returns (ran, rclone exit code).
+
+        `command` overrides the configured rclone command; `files_from` restricts the transfer
+        to the paths (relative to upload_folder) listed in that file.
+        """
+        command = command or self.config.get('rclone_command', 'move')
         if command.lower() == 'sync':
             # sync would delete remote files missing locally, never allow it for uploads
             command = 'move'
@@ -112,22 +129,59 @@ class RcloneUploader:
                   self.config['upload_remote'], command)
 
         args = [self.rclone_binary_path, command, self.config['upload_folder'], self.config['upload_remote'],
-                f'--config={self.rclone_config_path}',
-                *extras_to_args(self.config.get('rclone_extras', {})),
-                *excludes_to_args(self.config.get('rclone_excludes', [])),
-                *rc_args(self.plex)]
+                f'--config={self.rclone_config_path}', *rc_args(self.plex)]
+        if files_from:
+            # rclone rejects --files-from-raw combined with any other filter; the list is already filtered
+            args += [*self._transfer_args(), f'--files-from-raw={files_from}', '--no-traverse']
+        else:
+            args += self._filter_args()
         if self.dry_run:
             args.append('--dry-run')
 
         try:
             env = self._service_account_env() if self.service_account else None
-            return True, process.stream(args, callback, env).returncode
+            return True, process.stream(args, callback, env, logger=log).returncode
         except (OSError, ValueError):
             log.exception("Exception occurred while uploading %r to remote: %s", self.config['upload_folder'],
                           self.name)
         return False, 9999
 
+    def list_source(self) -> Optional[Dict[str, int]]:
+        """Files rclone would consider for upload (after excludes/age filters): {relative path: size}."""
+        return self._list(self.config['upload_folder'], self._filter_args())
+
+    def list_destination(self, files_from: str) -> Optional[Dict[str, int]]:
+        """Sizes of the given relative paths at the upload destination (missing paths are omitted)."""
+        return self._list(self.config['upload_remote'], [f'--files-from-raw={files_from}'])
+
+    def delete_destination_file(self, relative_path: str) -> bool:
+        target = join_remote(self.config['upload_remote'], relative_path)
+        if self.dry_run:
+            log.info("Dry run: would delete %r", target)
+            return True
+        result = process.run([self.rclone_binary_path, 'deletefile', target, f'--config={self.rclone_config_path}'])
+        if result.returncode != 0:
+            log.error("Failed deleting %r: %s", target, result.output)
+        return result.returncode == 0
+
     # internals
+    def _filter_args(self) -> List[str]:
+        return [*extras_to_args(self.config.get('rclone_extras', {})),
+                *excludes_to_args(self.config.get('rclone_excludes', []))]
+
+    def _transfer_args(self) -> List[str]:
+        """rclone_extras without filter flags, for transfers driven by an explicit file list."""
+        extras = self.config.get('rclone_extras', {})
+        return extras_to_args({key: value for key, value in extras.items() if not key.startswith(FILTER_FLAGS)})
+
+    def _list(self, location: str, extra_args: Sequence[str]) -> Optional[Dict[str, int]]:
+        output = process.check_output([self.rclone_binary_path, 'lsjson', '-R', '--files-only', '--no-mimetype',
+                                       '--no-modtime', location, f'--config={self.rclone_config_path}',
+                                       *extra_args])
+        if output is None:
+            return None
+        return {entry['Path']: entry['Size'] for entry in json.loads(output or '[]')}
+
     def _run_delete(self, command: str, path: str, failure_text: str) -> bool:
         args = [self.rclone_binary_path, command, path, f'--config={self.rclone_config_path}']
         if self.dry_run:
@@ -173,7 +227,7 @@ class RcloneSyncer:
         if self.dry_run:
             args.append('--dry-run')
 
-        process.stream(cmd_wrapper(args), self.triggers)
+        process.stream(cmd_wrapper(args), self.triggers, logger=log)
         return not self.triggers.delay_hours, self.triggers.delay_hours, self.triggers.tripped
 
 
