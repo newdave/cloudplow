@@ -131,6 +131,14 @@ class RateArbiterTests(unittest.TestCase):
         rates.set_plex('400M', rclone)
         self.assertEqual(rclone.calls, ['400M'])
 
+    def test_force_pushes_a_rate_that_looks_applied(self):
+        rates, rclone = RateArbiter(), FakeThrottler()
+        rates.start_upload(None)
+        rates.set_plex('50M', rclone)
+        rates.set_plex('50M', rclone)              # unchanged: nothing to send
+        rates.set_plex('50M', rclone, force=True)  # a new rclone started without the limit
+        self.assertEqual(rclone.calls, ['50M', '50M'])
+
     def test_failed_push_is_retried(self):
         rates, rclone = RateArbiter(), FakeThrottler(works=False)
         rates.start_upload(None)

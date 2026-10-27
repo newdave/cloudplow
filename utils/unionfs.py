@@ -89,10 +89,13 @@ class UnionfsHiddenFolder:
         return found
 
     def _hidden2remote(self, remote: Mapping[str, Any], hidden_path: str) -> Optional[str]:
-        if not remote.get('hidden_remote') or not hidden_path.startswith(self.unionfs_fuse):
+        # compare and join without trailing slashes, so '/x/.unionfs-fuse/' and 'gd:/Media/' map like their
+        # slash-less forms (and '/x/.unionfs-fuse2' is not mistaken for part of '/x/.unionfs-fuse')
+        base = self.unionfs_fuse.rstrip('/')
+        if not remote.get('hidden_remote') or not hidden_path.startswith(base + '/'):
             log.error("Failed mapping %r to a remote path", hidden_path)
             return None
-        remote_path = remote['hidden_remote'] + hidden_path[len(self.unionfs_fuse):]
+        remote_path = remote['hidden_remote'].rstrip('/') + hidden_path[len(base):]
         if remote_path.endswith(HIDDEN_SUFFIX):
             remote_path = remote_path[:-len(HIDDEN_SUFFIX)]
         log.debug("Mapped %r to %r", hidden_path, remote_path)

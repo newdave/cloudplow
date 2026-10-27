@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -19,6 +20,7 @@ def read(file_path):
         return fp.read()
 
 
+@unittest.skipUnless(shutil.which('rclone'), 'rclone is not installed')
 class VerifiedMoveTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -71,6 +73,8 @@ class VerifiedMoveTests(unittest.TestCase):
 
         self.assertFalse(os.path.exists(self.dst_path('deleted.mp4')))         # no stale copy left behind
 
+        if os.geteuid() == 0:
+            return  # root can read a mode-0 file, so the failed-copy case cannot be staged
         self.assertTrue(os.path.exists(self.src_path('unreadable.mp4')))       # failed copy keeps the source
         self.assertFalse(os.path.exists(self.dst_path('unreadable.mp4')))
         self.assertFalse(result.success)                                       # rclone reported the failure

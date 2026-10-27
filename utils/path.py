@@ -16,7 +16,8 @@ def find_items(folder: str, suffix: Optional[str] = None, depth: Optional[int] =
     Results are ordered deepest-first so they can be removed in order.
     """
     found = []
-    start_depth = folder.rstrip(os.sep).count(os.sep)
+    folder = folder.rstrip(os.sep) or os.sep   # os.walk keeps a trailing slash, which would skew the depth
+    start_depth = folder.count(os.sep)
     for root, subdirs, filenames in os.walk(folder, topdown=True):
         if depth and root.count(os.sep) - start_depth >= depth:
             del subdirs[:]
@@ -37,6 +38,20 @@ def opened_files(folder: str, sudo: bool = False) -> List[str]:
     result = process.run([*(['sudo', '-n'] if sudo else []), 'lsof', '-w', '-F', 'n', '+D', folder])
     names = (line[1:] for line in result.output.splitlines() if line.startswith('n'))
     return sorted({name for name in names if os.path.isfile(name)})
+
+
+def get_size(folder: str, excludes: Optional[Iterable[str]] = None) -> int:
+    """Size of `folder` in whole GiB as du reports it (rounded up); 0 if it cannot be measured.
+
+    `excludes` are du --exclude patterns, matched against file and directory names.
+    """
+    args = ['du', '-s', '--block-size=1G', *(f'--exclude={pattern}' for pattern in excludes or []), folder]
+    result = process.run(args)
+    size = result.output.split('\t', 1)[0].strip() if result.returncode == 0 else ''
+    if not size.isdigit():
+        log.error("Unable to determine the size of %r: %s", folder, result.output)
+        return 0
+    return int(size)
 
 
 def delete(paths: Iterable[str] | str) -> None:

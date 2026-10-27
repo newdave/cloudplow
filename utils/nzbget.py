@@ -22,6 +22,9 @@ class Nzbget:
         try:
             with server_proxy(self.url) as proxy:
                 return bool(getattr(proxy, method)())
+        except xmlrpc.client.ProtocolError as error:
+            # its message (and so a traceback) contains the URL with the user:password from the config
+            log.error("NzbGet %s failed: HTTP %d %s", method, error.errcode, error.errmsg)
         except (OSError, xmlrpc.client.Error):
             log.exception("Exception calling NzbGet %s: ", method)
         return False

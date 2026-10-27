@@ -64,6 +64,13 @@ class Config:
             'enabled': False,
             'url': 'https://sabnzbd.domain.com',
             'apikey': ''
+        },
+        # qbittorrent settings: alternative speed limits while uploading
+        'qbittorrent': {
+            'enabled': False,
+            'url': 'http://qbittorrent:8080',
+            'username': '',
+            'password': ''
         }
     }
 
@@ -195,7 +202,7 @@ class Config:
                                                                   overwrite=overwrite)
                     sub_upgraded = did_upgrade or sub_upgraded
                 elif settings1[k] != settings2[k] and overwrite:
-                    merged = settings1
+                    merged[k] = v
                     sub_upgraded = True
         elif isinstance(settings1, list) and key:
             for v in settings1:
@@ -231,14 +238,16 @@ class Config:
 
         log.debug("Upgrading config...")
         with open(self.settings['config'], 'r') as fp:
-            cfg, upgraded = self.upgrade_settings(json.load(fp))
+            file_cfg = json.load(fp)
 
-            # Save config if upgraded
-            if upgraded:
-                self.save(cfg)
-            else:
-                log.debug("Config was not upgraded as there were no changes to add.")
+        # save the upgrade of the file alone: ENV overrides (which may carry secrets) stay in memory
+        saved_cfg, upgraded = self.__inner_upgrade(self.base_config, file_cfg)
+        if upgraded:
+            self.save(saved_cfg)
+        else:
+            log.debug("Config was not upgraded as there were no changes to add.")
 
+        cfg, _ = self.upgrade_settings(deepcopy(file_cfg))
         self.configs = cfg
 
     def save(self, cfg):

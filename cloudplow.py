@@ -12,10 +12,11 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 import schedule
 
-from utils import config, decorators, lock, logs, misc, overrides, process, version
+from utils import config, decorators, lock, logs, misc, overrides, path, process, version
 from utils.cache import Cache
 from utils.notifications import Notifications
 from utils.nzbget import Nzbget
+from utils.qbittorrent import Qbittorrent
 from utils.plex import Plex
 from utils.rclone import RcloneMover, RcloneThrottler
 from utils.ratelimit import RateArbiter
@@ -48,6 +49,8 @@ class Cloudplow:
         self.uploader_bans = cache.get_cache('uploader_bans')
         self.syncer_bans = cache.get_cache('syncer_bans')
         self.sa_bans = cache.get_cache('sa_bans')
+        # what cloudplow changed in download clients, so it can be undone after a restart mid-upload
+        self.download_client_state = cache.get_cache('download_clients')
 
         self.notify = Notifications()
         self.syncer = Syncer(self.configs)
@@ -342,29 +345,41 @@ class Cloudplow:
 
     @contextlib.contextmanager
     def _download_clients_paused(self) -> Iterator[None]:
-        """Pause enabled download clients for the duration of the block, resuming only those we paused."""
+        """Pause (or slow) enabled download clients for the duration of the block, undoing only what we changed."""
         clients: List[Any] = []
         if self.configs['nzbget']['enabled']:
-            clients.append(('Nzbget', Nzbget(self.configs['nzbget']['url'])))
+            clients.append(('the Nzbget download queue', 'Paused', 'Resumed', 'pause', 'resume',
+                            Nzbget(self.configs['nzbget']['url'])))
         if self.configs['sabnzbd']['enabled']:
-            clients.append(('Sabnzbd', Sabnzbd(self.configs['sabnzbd']['url'], self.configs['sabnzbd']['apikey'])))
+            clients.append(('the Sabnzbd download queue', 'Paused', 'Resumed', 'pause', 'resume',
+                            Sabnzbd(self.configs['sabnzbd']['url'], self.configs['sabnzbd']['apikey'])))
+        qbittorrent = self._qbittorrent()
+        if qbittorrent:
+            clients.append(('qBittorrent alternative speed limits', 'Enabled', 'Disabled', 'enable', 'disable',
+                            qbittorrent))
 
-        paused = []
-        for label, client in clients:
+        changed = []
+        for what, done, undone, verb, undo_verb, client in clients:
             if client.pause_queue():
-                paused.append((label, client))
-                self._log_and_notify(logging.INFO, f"Paused the {label} download queue, upload commencing!")
+                changed.append((what, undone, undo_verb, client))
+                self._log_and_notify(logging.INFO, f"{done} {what}, upload commencing!")
             else:
-                self._log_and_notify(logging.ERROR,
-                                     f"Failed to pause the {label} download queue, upload commencing anyway...")
+                self._log_and_notify(logging.ERROR, f"Failed to {verb} {what}, upload commencing anyway...")
         try:
             yield
         finally:
-            for label, client in paused:
+            for what, undone, undo_verb, client in changed:
                 if client.resume_queue():
-                    self._log_and_notify(logging.INFO, f"Resumed the {label} download queue!")
+                    self._log_and_notify(logging.INFO, f"{undone} {what}!")
                 else:
-                    self._log_and_notify(logging.ERROR, f"Failed to resume the {label} download queue??")
+                    self._log_and_notify(logging.ERROR, f"Failed to {undo_verb} {what}??")
+
+    def _qbittorrent(self) -> Optional[Qbittorrent]:
+        settings = self.configs.get('qbittorrent', {})
+        if not settings.get('enabled'):
+            return None
+        return Qbittorrent(settings['url'], settings.get('username', ''), settings.get('password', ''),
+                           self.download_client_state)
 
     def _move(self, name: str, mover_config: Mapping[str, Any]) -> None:
         missing = [setting for setting in MOVER_REQUIRED_SETTINGS if setting not in mover_config]
@@ -542,7 +557,8 @@ class Cloudplow:
                     log.info(stream)
                 log.info("Upload throttling will now commence.")
                 throttle_speed = wanted_speed
-                throttled = self.rates.set_plex(throttle_speed, rclone)
+                # already throttled, yet rclone runs faster (e.g. a new process for the next service account): push again
+                throttled = self.rates.set_plex(throttle_speed, rclone, force=throttled)
                 if throttled and plex_config['notifications']:
                     self.notify.send(f"Throttled current upload to {throttle_speed} because there was "
                                      f"{stream_count} playing stream(s) on Plex")
@@ -582,6 +598,18 @@ class Cloudplow:
                 return
             self.release_expired_service_accounts(name)
 
+            # optional, as in upstream cloudplow (and Saltbox's generated config): wait for the folder to fill up
+            max_size_gb = uploader_config.get('max_size_gb')
+            if max_size_gb is not None:
+                upload_folder = self.configs['remotes'][name]['upload_folder']
+                used = path.get_size(upload_folder, uploader_config.get('size_excludes', []))
+                if used < max_size_gb:
+                    log.info("Uploader: %s. Local folder size is currently %d GB. Still have %d GB remaining "
+                             "before it is eligible to begin uploading...", name, used, max_size_gb - used)
+                    return
+                log.info("Uploader: %s. Local folder size is currently %d GB, reaching the limit of %d GB",
+                         name, used, max_size_gb)
+
             upload_window = uploader_config.get('schedule', {})
             if upload_window.get('enabled'):
                 allowed = (upload_window['allowed_from'], upload_window['allowed_until'])
@@ -607,6 +635,10 @@ class Cloudplow:
         Process(target=self.scheduled_syncer, kwargs={'syncer_name': syncer_name}).start()
 
     def run_forever(self) -> None:
+        qbittorrent = self._qbittorrent()
+        if qbittorrent and not qbittorrent.restore_leftovers():
+            log.error("Unable to switch off qBittorrent alternative speed limits left on by an interrupted upload")
+
         for name, uploader_config in self.configs['uploader'].items():
             schedule.every(uploader_config['check_interval']).minutes.do(self.scheduled_uploader, name,
                                                                         uploader_config)

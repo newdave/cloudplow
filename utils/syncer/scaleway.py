@@ -18,6 +18,15 @@ INSTALL_RCLONE = ("cd ~ && curl -sO https://downloads.rclone.org/rclone-current-
                   "chmod 755 /usr/bin/rclone && mkdir -p /root/.config/rclone && which rclone")
 
 
+REMOTE_RCLONE_CONFIG = '/root/.config/rclone/rclone.conf'
+
+
+def _instance_listed(ps_output: str, name: str) -> bool:
+    """Whether `scw ps` lists an instance called exactly `name` (not just a name containing it)."""
+    wanted = name.lower()
+    return any(wanted in (column.lower() for column in line.split()) for line in ps_output.splitlines()[1:])
+
+
 class Scaleway:
     NAME = 'Scaleway'
 
@@ -38,12 +47,12 @@ class Scaleway:
                  from_config['sync_remote'], to_config['sync_remote'], tool_path)
 
     def startup(self, name: str) -> Tuple[bool, Optional[str]]:
-        resp = process.check_output([self.tool_path, 'ps', '-a'])
+        resp = self._scw('ps', '-a')
         if not resp or 'zone' not in resp.lower():
             log.error("Unexpected response while checking if instance %s exists: %s", name, resp)
             return False, self.instance_id
 
-        if self.instance_destroy or name.lower() not in resp.lower():
+        if self.instance_destroy or not _instance_listed(resp, name):
             log.debug("Creating new instance...")
             resp = self._scw('run', '-d', f'--name={name}', '--ipv6', f'--commercial-type={self.type}', self.image)
             if not resp or 'failed' in resp.lower():
@@ -86,7 +95,8 @@ class Scaleway:
             return self._fail(f"Unexpected response while installing rclone: {resp}")
         log.info("Installed rclone")
 
-        resp = self._scw('cp', rclone_config, f'{self.instance_id}:/root/.config/rclone/')
+        # always as rclone.conf: the name the remote rclone reads, and the file sync() copies back
+        resp = self._scw('cp', rclone_config, f'{self.instance_id}:{REMOTE_RCLONE_CONFIG}')
         if resp is None or len(resp) >= 2:
             return self._fail(f"Unexpected response while copying rclone config: {resp}")
         log.info("Copied across rclone.conf")
@@ -120,7 +130,7 @@ class Scaleway:
         log.info("Finished syncing for instance: %s", self.instance_id)
 
         # copy rclone.conf back from the instance in case refresh tokens were rotated
-        remote_config = self._scw('exec', self.instance_id, 'cat /root/.config/rclone/rclone.conf')
+        remote_config = self._scw('exec', self.instance_id, f'cat {REMOTE_RCLONE_CONFIG}')
         if remote_config:
             with open(rclone_config, 'w') as fp:
                 fp.write(remote_config + '\n')

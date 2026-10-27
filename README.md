@@ -1,12 +1,18 @@
 <img src="assets/logo.svg" width="600" alt="Cloudplow">
 
 
-[![made-with-python](https://img.shields.io/badge/Made%20with-Python-blue.svg?style=flat-square)](https://www.python.org/)
-[![License: GPL v3](https://img.shields.io/badge/License-GPL%203-blue.svg?style=flat-square)](https://github.com/l3uddz/cloudplow/blob/master/LICENSE.md)
-[![last commit (master)](https://img.shields.io/github/last-commit/l3uddz/cloudplow/master.svg?colorB=177DC1&label=Last%20Commit&style=flat-square)](https://github.com/l3uddz/cloudplow/commits/master)
-[![Discord](https://img.shields.io/discord/853755447970758686.svg?colorB=177DC1&label=Discord&style=flat-square)](https://discord.gg/ugfKXpFND8)
+[![CI](https://img.shields.io/github/actions/workflow/status/newdave/cloudplow/ci.yml?branch=master&label=CI&style=flat-square)](https://github.com/newdave/cloudplow/actions/workflows/ci.yml)
+[![made-with-python](https://img.shields.io/badge/Made%20with-Python%203.8%2B-blue.svg?style=flat-square)](https://www.python.org/)
+[![License: GPL v3](https://img.shields.io/badge/License-GPL%203-blue.svg?style=flat-square)](LICENSE.md)
+[![last commit (master)](https://img.shields.io/github/last-commit/newdave/cloudplow/master.svg?colorB=177DC1&label=Last%20Commit&style=flat-square)](https://github.com/newdave/cloudplow/commits/master)
+[![Changelog](https://img.shields.io/badge/Changelog-gray.svg?style=flat-square)](CHANGELOG.md)
 [![Contributing](https://img.shields.io/badge/Contributing-gray.svg?style=flat-square)](CONTRIBUTING.md)
-[![Donate](https://img.shields.io/badge/Donate-gray.svg?style=flat-square)](#donate)
+
+> This is a maintained fork of [l3uddz/cloudplow](https://github.com/l3uddz/cloudplow). It adds safer uploads to
+> local and network destinations (verified moves, mount guards, in-progress file handling), post-upload scripts,
+> load-based bandwidth limiting and a test suite. It reads upstream `config.json` files unchanged and works as a
+> drop-in replacement in [Saltbox](https://github.com/saltyorg/Saltbox) (see [Saltbox](#saltbox)). See the
+> [changelog](CHANGELOG.md) for everything that changed.
 
 ---
 
@@ -22,14 +28,18 @@
   - [Notifications](#notifications)
   - [NZBGet](#nzbget)
   - [Sabnzbd](#sabnzbd)
+  - [qBittorrent](#qbittorrent)
   - [Plex](#plex)
   - [Remotes](#remotes)
   - [Uploader](#uploader)
+  - [Post Scripts and Rate Limiting](#post-scripts-and-rate-limiting)
   - [Syncer](#syncer)
 - [Usage](#usage)
   - [Automatic (Scheduled)](#automatic-scheduled)
   - [Manual (CLI)](#manual-cli)
-- [Donate](#donate)
+- [Saltbox](#saltbox)
+- [Development](#development)
+- [Credits](#credits)
 
 <!-- /TOC -->
 
@@ -41,27 +51,38 @@
 
 Cloudplow has 3 main functions:
 
-1. Automatic uploader to Rclone remote : Files are moved off local storage. With support for multiple uploaders (i.e. remote/folder pairings).
+1. Automatic uploader: moves files off local storage to an Rclone remote or to another local path such as an NFS
+   mount, with support for multiple uploaders (i.e. remote/folder pairings). Uploads can be:
+   - **verified** (`verified_move`): local files are only removed once their copy is confirmed and they did not
+     change during the upload, which makes uploading into a mergerfs branch safe;
+   - **guarded** (`require_mounts`): skipped while a destination mount is missing, so nothing is written into an
+     empty mount point;
+   - **rate limited**: throttled while Plex streams are playing, and tuned to system load by a
+     [rate script](#post-scripts-and-rate-limiting).
 
 2. UnionFS Cleaner functionality: Deletion of UnionFS-Fuse whiteout files (`*_HIDDEN~`) and their corresponding "whited-out" files on Rclone remotes. With support for multiple remotes (useful if you have multiple Rclone remotes mounted).
 
 3. Automatic remote syncer: Sync between two different Rclone remotes using 3rd party VM instances. With support for multiple remote/folder pairings. With support for multiple syncers (i.e. remote/remote pairings).
 
+After every upload, an optional [post script](#post-scripts-and-rate-limiting) can act on the result.
+
 
 # Requirements
 
-1. Ubuntu/Debian OS (could work in other OSes with some tweaks).
+1. Linux (developed on Ubuntu/Debian; other distributions should work).
 
-2. Python 3.6 or higher (`sudo apt install python3 python3-pip`).
+2. Python 3.8 or higher, with `venv` (`sudo apt install python3 python3-venv`).
 
-3. Required Python modules (see below).
+3. [Rclone](https://rclone.org/) (`rclone_binary_path` in the config).
+
+4. `lsof`, for `exclude_open_files`. With mergerfs, passwordless `sudo` for `lsof` as well (see `opened_files_sudo`).
 
 # Installation
 
 1. Clone the Cloudplow repo.
 
    ```
-   sudo git clone https://github.com/l3uddz/cloudplow /opt/cloudplow
+   sudo git clone https://github.com/newdave/cloudplow /opt/cloudplow
    ```
 
 2. Fix permissions of the Cloudplow folder (replace `user`/`group` with your info; run `id` to check).
@@ -76,35 +97,33 @@ Cloudplow has 3 main functions:
    cd /opt/cloudplow
    ```
 
-4. Install Python PIP.
+4. Create a virtual environment and install the required Python modules into it.
 
    ```
-   sudo apt-get install python3-pip
+   python3 -m venv venv
+   venv/bin/pip install -r requirements.txt
    ```
 
-5. Install the required python modules.
+5. Create a shortcut for Cloudplow that uses the virtual environment.
 
    ```
-   sudo python3 -m pip install -r requirements.txt
+   printf '#!/bin/sh\nexec /opt/cloudplow/venv/bin/python3 /opt/cloudplow/cloudplow.py "$@"\n' | sudo tee /usr/local/bin/cloudplow >/dev/null
+   sudo chmod +x /usr/local/bin/cloudplow
    ```
 
-6. Create a shortcut for Cloudplow.
-
-   ```
-   sudo ln -s /opt/cloudplow/cloudplow.py /usr/local/bin/cloudplow
-   ```
-
-7. Generate a basic `config.json` file.
+6. Generate a basic `config.json` file.
 
    ```
    cloudplow run
    ```
 
-8. Configure the `config.json` file.
+7. Configure the `config.json` file.
 
    ```
    nano config.json
    ```
+
+   Cloudplow reads `config.json` once, at startup: restart it after every change.
 
 
 # Configuration
@@ -203,9 +222,11 @@ Cloudplow has 3 main functions:
             },
             "rclone_command": "move",
             "remove_empty_dir_depth": 2,
+            "require_mounts": [],
             "sync_remote": "google:/Backups",
             "upload_folder": "/mnt/local/Media",
-            "upload_remote": "google:/Media"
+            "upload_remote": "google:/Media",
+            "verified_move": false
         },
         "google_downloads": {
             "hidden_remote": "",
@@ -328,6 +349,10 @@ Cloudplow has 3 main functions:
             "opened_excludes": [
                 "/downloads/"
             ],
+            "opened_files_sudo": false,
+            "post_script": "",
+            "rate_script": "",
+            "rate_script_interval": 60,
             "schedule": {
                 "allowed_from": "04:00",
                 "allowed_until": "08:00",
@@ -553,6 +578,32 @@ Cloudplow can pause the Sabnzbd download queue when an upload starts; and then r
 ```
 
 `enabled` - `true` to enable.
+
+## qBittorrent
+
+Cloudplow can switch on qBittorrent's alternative speed limits ("turtle mode") when an upload starts, and switch them
+off again when it finishes, so downloads and seeding slow down instead of stopping. Set the limits themselves in
+qBittorrent under Options > Speed > Alternative Rate Limits.
+
+```
+"qbittorrent": {
+    "enabled": false,
+    "url": "http://qbittorrent:8080",
+    "username": "admin",
+    "password": "adminadmin"
+},
+```
+
+`enabled` - `true` to enable.
+
+`url` - The qBittorrent Web UI address.
+
+`username` / `password` - Web UI login. Leave both empty if qBittorrent does not ask this host to log in
+(Options > Web UI > "Bypass authentication for clients on localhost" or the whitelisted subnets).
+
+If the alternative limits are already on when an upload starts, Cloudplow leaves them on afterwards. If Cloudplow is
+stopped mid-upload, it switches the limits it turned on back off the next time it starts.
+
 ## Plex
 
 Cloudplow can throttle Rclone uploads during active, playing Plex streams (paused streams are ignored).
@@ -767,6 +818,10 @@ If multiple uploader tasks are specified, the tasks will run sequentially (vs in
         "opened_excludes": [
             "/downloads/"
         ],
+        "opened_files_sudo": false,
+        "post_script": "",
+        "rate_script": "",
+        "rate_script_interval": 60,
         "schedule": {
             "allowed_from": "04:00",
             "allowed_until": "08:00",
@@ -781,7 +836,9 @@ In the example above, the uploader references `"google"` from the `remotes` sect
 
 `"can_be_throttled"`: When this attribute is missing or set to `true`, this uploader can be throttled if enabled in the Plex config section. When set to `false`, no throttling will be attempted on this uploader.
 
-`"check_interval"`: How often (in minutes) to upload this remote's `upload_folder`. Use rclone's `--min-age` in `rclone_extras` to hold back files that are still being written.
+`"check_interval"`: How often (in minutes) to check this remote's `upload_folder` and upload it. Use rclone's `--min-age` in `rclone_extras` to hold back files that are still being written.
+
+`"max_size_gb"` / `"size_excludes"` (optional): Only upload once `upload_folder` has reached `max_size_gb` GB, measured by `du` while skipping anything matching the `size_excludes` patterns (e.g. `"downloads/*"`). Without `max_size_gb`, every check uploads whatever is eligible. Manual `upload` runs ignore the threshold.
 
 `"exclude_open_files"`: When set to `true`, open files will be excluded from the Rclone upload (i.e. upload will occur without them).
 
@@ -795,25 +852,11 @@ In the example above, the uploader references `"google"` from the `remotes` sect
 
 `"service_account_path"`: Path that will be scanned for Google Drive service account keys (\*.json) to be used when performing upload operations.
 
-`"post_script"`: Path to an executable (with a shebang line) that is run after each upload to this remote finishes, whether or not the upload succeeded. Leave empty (`""`) to disable. The script receives these environment variables:
-
-| Variable | Value |
-|---|---|
-| `CLOUDPLOW_REMOTE` | The remote name |
-| `CLOUDPLOW_STATUS` | `success`, `failed` (includes a skip because a `require_mounts` path is not mounted), `aborted` (an rclone trigger suspended the remote) or `error` (an exception occurred); `running` for a `rate_script` |
-| `CLOUDPLOW_REASON` | Why it failed or was aborted (empty on success) |
-| `CLOUDPLOW_UPLOAD_FOLDER` / `CLOUDPLOW_UPLOAD_REMOTE` | The remote's source and destination |
-| `CLOUDPLOW_OVERRIDES_FILE` | Where the script may write rclone overrides for this remote (see below) |
-| `CLOUDPLOW_CONFIG_DIR` | The folder containing `config.json` |
-| `CLOUDPLOW_DRY_RUN` | `1` in dry run mode, otherwise `0` |
-
-`scripts/post_script/post.sh` is a ready-made `post_script` that runs every executable in `scripts/post_script/post.d/`, configured by a `post_script.conf` next to `config.json` (see `post_script.conf.sample`).
-
-`"rate_script"` / `"rate_script_interval"`: An executable run every `rate_script_interval` seconds (default 60) while an upload to this remote is in progress, with `CLOUDPLOW_STATUS=running`. If the `--bwlimit` in its overrides file changes, it is applied to the running upload immediately through rclone's remote control (which the `plex` section enables). `scripts/post_script/post.d/10-tune-load` chooses `--transfers` and `--bwlimit` from the local and NAS load averages and works both as a `rate_script` and as part of `post.sh`.
-
-The overrides file (`overrides/<remote>.json` next to `config.json`) is a JSON object such as `{"--transfers": 2, "--bwlimit": "100M"}`, merged over the remote's `rclone_extras` at the start of every upload. Only `--bwlimit`, `--transfers`, `--checkers`, `--tpslimit`, `--multi-thread-streams` and `--buffer-size` are accepted. When Plex throttling is also active, the upload runs at the slower of the two limits.
-
   - This is currently not supported with sync operations.
+
+`"post_script"`: Path to an executable run after each upload to this remote finishes. Leave empty (`""`) to disable. See [Post Scripts and Rate Limiting](#post-scripts-and-rate-limiting).
+
+`"rate_script"` / `"rate_script_interval"`: An executable run every `rate_script_interval` seconds (default 60) while an upload to this remote is in progress. Leave empty (`""`) to disable. See [Post Scripts and Rate Limiting](#post-scripts-and-rate-limiting).
 
 ### Mover
 
@@ -846,6 +889,69 @@ Can be used to move uploads from one folder to another on the same remote (i.e. 
 
 `"rclone_extras"` - Optional Rclone parameters.
 
+
+## Post Scripts and Rate Limiting
+
+### Post scripts
+
+`post_script` is an executable (with a shebang line) that Cloudplow runs after each upload to a remote finishes, whether or not the upload succeeded. Its output is written to the Cloudplow log. It runs while the upload lock is held, so keep it short or background slow work.
+
+The script receives these environment variables:
+
+| Variable | Value |
+|---|---|
+| `CLOUDPLOW_REMOTE` | The remote name |
+| `CLOUDPLOW_STATUS` | `success`, `failed` (includes a skip because a `require_mounts` path is not mounted), `aborted` (an rclone trigger suspended the remote) or `error` (an exception occurred); `running` for a `rate_script` |
+| `CLOUDPLOW_REASON` | Why it failed or was aborted (empty on success) |
+| `CLOUDPLOW_UPLOAD_FOLDER` / `CLOUDPLOW_UPLOAD_REMOTE` | The remote's source and destination |
+| `CLOUDPLOW_OVERRIDES_FILE` | Where the script may write rclone overrides for this remote (see below) |
+| `CLOUDPLOW_CONFIG_DIR` | The folder containing `config.json` |
+| `CLOUDPLOW_DRY_RUN` | `1` in dry run mode, otherwise `0` |
+
+### Rclone overrides
+
+A script can tune a remote's uploads by writing `overrides/<remote>.json` next to `config.json` (the path is in `CLOUDPLOW_OVERRIDES_FILE`), for example:
+
+```json
+{"--transfers": 2, "--bwlimit": "100M"}
+```
+
+The file is merged over the remote's `rclone_extras` at the start of every upload. Only `--bwlimit`, `--transfers`, `--checkers`, `--tpslimit`, `--multi-thread-streams` and `--buffer-size` are accepted, so a script cannot change what is uploaded. A missing or invalid file is ignored.
+
+### Rate scripts
+
+`rate_script` is run every `rate_script_interval` seconds while an upload to the remote is in progress, with `CLOUDPLOW_STATUS=running`. When the `--bwlimit` in its overrides file changes, Cloudplow applies it to the running upload immediately through rclone's remote control, which is enabled by the [Plex](#plex) section. Other overrides, such as `--transfers`, take effect at the start of the next upload.
+
+When Plex throttling is also active, the upload runs at the slower of the two limits, and when Plex streams stop it returns to the rate script's limit rather than to unlimited.
+
+### Bundled scripts
+
+`scripts/post_script/` contains ready-made scripts, configured by a `post_script.conf` next to `config.json` (copy `scripts/post_script/post_script.conf.sample`; the file is sourced as shell):
+
+| Script | Use as | What it does |
+|---|---|---|
+| `post.sh` | `post_script` | Runs every executable in `post.d/` in name order and reports any that fail. |
+| `post.d/10-tune-load` | `rate_script` (and part of `post.sh`) | Divides the local load average, and optionally a NAS's (read over SSH), by its CPU count. The busier machine selects a `TUNE_TIERS` entry (`max_load_per_cpu:transfers:bwlimit`), which is written as the remote's overrides. |
+| `post.d/20-healthcheck` | part of `post.sh` | Pings a healthchecks.io-style URL or an Uptime Kuma push URL with the upload's outcome. |
+| `post.d/30-permissions` | part of `post.sh` | Makes newly uploaded files on local destinations group-writable, and optionally re-owns them. |
+
+For example, to tune every upload to load while it runs and tidy up afterwards:
+
+```json
+"uploader": {
+    "nfs-movies": {
+        "post_script": "/opt/cloudplow/scripts/post_script/post.sh",
+        "rate_script": "/opt/cloudplow/scripts/post_script/post.d/10-tune-load",
+        "rate_script_interval": 60
+    }
+}
+```
+
+To read a NAS's load, give `10-tune-load` a dedicated SSH key (`NAS_SSH_KEY`) and restrict it on the NAS to the one command it runs:
+
+```
+command="cat /proc/loadavg; grep -c ^processor /proc/cpuinfo",restrict ssh-ed25519 AAAA... cloudplow load probe
+```
 
 ## Syncer
 
@@ -1023,6 +1129,8 @@ To have Cloudplow run automatically, do the following:
 
 1. `sudo cp /opt/cloudplow/systemd/cloudplow.service /etc/systemd/system/`
 
+   Edit `User`/`Group` in the copied file to match the owner of `/opt/cloudplow`.
+
 2. `sudo systemctl daemon-reload`
 
 3. `sudo systemctl enable cloudplow.service`
@@ -1037,38 +1145,91 @@ cloudplow
 ```
 
 ```
-usage: cloudplow [-h] [--config [CONFIG]] [--logfile [LOGFILE]]
-                 [--loglevel {WARN,INFO,DEBUG}]
-                 {clean,upload,sync,run}
+usage: cloudplow [-h] [--config [CONFIG]] [--logfile [LOGFILE]] [--cachefile [CACHEFILE]]
+                 [--loglevel {DEBUG,INFO,WARNING,WARN,ERROR}]
+                 {clean,upload,sync,run,update_config}
 
 Script to assist cloud mount users.
-Can remove UnionFS hidden files from Rclone remotes, upload local content to Rclone remotes, and keep Rclone Remotes in sync.
+Can remove UnionFS hidden files from Rclone remotes, upload local content to Rclone remotes, and keep Rclone remotes in sync.
 
 positional arguments:
-  {clean,upload,sync,run}
+  {clean,upload,sync,run,update_config}
                         "clean": perform clean of UnionFS HIDDEN files from Rclone remotes
                         "upload": perform clean of UnionFS HIDDEN files and upload local content to Rclone remotes
                         "sync": perform sync between Rclone remotes
                         "run": starts the application in automatic mode
+                        "update_config": perform simple update of config
 
 optional arguments:
   -h, --help            show this help message and exit
   --config [CONFIG]     Config file location (default: /opt/cloudplow/config.json)
   --logfile [LOGFILE]   Log file location (default: /opt/cloudplow/cloudplow.log)
-  --loglevel {WARN,INFO,DEBUG}
+  --cachefile [CACHEFILE]
+                        Cache file location (default: /opt/cloudplow/cache.db)
+  --loglevel {DEBUG,INFO,WARNING,WARN,ERROR}
                         Log level (default: INFO)
 ```
 
 ***
 
-# Donate
+# Saltbox
 
-If you find this project helpful, feel free to make a small donation to the developer:
+This fork is a drop-in replacement for upstream Cloudplow in [Saltbox](https://github.com/saltyorg/Saltbox). Point the
+`cloudplow` role at it in `/srv/git/saltbox/inventories/host_vars/localhost.yml`:
 
-  - [Monzo](https://monzo.me/today): Credit Cards, Apple Pay, Google Pay
+```yaml
+cloudplow_git_repo_url: "https://github.com/newdave/cloudplow.git"
+cloudplow_git_repo_branch_primary: "master"
+```
 
-  - [Beerpay](https://beerpay.io/l3uddz/cloudplow): Credit Cards
+and run `sb install cloudplow`. Saltbox clones the repo, builds a Python 3.8 virtual environment, generates
+`config.json` on first install (with `max_size_gb`/`size_excludes`, which this fork honours), and runs
+`cloudplow.py update_config` on later installs; that keeps every setting this fork adds.
 
-  - [Paypal: l3uddz@gmail.com](https://www.paypal.me/l3uddz)
+The role checks out `master` with force, so local changes in `/opt/cloudplow` are lost on every install. Keep
+`config.json`, `post_script.conf` and `overrides/` there (they are not tracked), and commit and push anything else.
 
-  - BTC: 3CiHME1HZQsNNcDL6BArG7PbZLa8zUUgjL
+# Development
+
+Cloudplow has no build step. Set up a virtual environment as in [Installation](#installation), then run the tests from the repository root:
+
+```
+venv/bin/python3 -m unittest discover -s tests
+```
+
+The verified-move tests run a real `rclone` and are skipped when it is not installed; run them as a regular user, since
+one of them relies on a file being unreadable.
+
+The bundled shell scripts are checked with [ShellCheck](https://www.shellcheck.net/):
+
+```
+shellcheck scripts/post_script/post.sh scripts/post_script/post.d/*
+```
+
+Both run in CI on every push and pull request, together with a coverage check: install `requirements-dev.txt` and run
+`python3 -m coverage run -m unittest discover -s tests && python3 -m coverage report` to see it locally. A pull
+request passes the `CI gate` check only if the tests pass on every supported Python, ShellCheck is clean, and total
+coverage is not lower than on the branch it targets. See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull
+request.
+
+| Path | Contents |
+|---|---|
+| `cloudplow.py` | Command line, scheduler and the `Cloudplow` class that runs uploads, syncs and Plex throttling |
+| `utils/` | Config, rclone command building, uploader, syncers, notifications, locking, logging |
+| `scripts/post_script/` | Bundled post and rate scripts |
+| `tests/` | `unittest` suite |
+| `systemd/` | Example service unit |
+
+# Credits
+
+Cloudplow was created by [l3uddz](https://github.com/l3uddz) and maintained upstream at
+[l3uddz/cloudplow](https://github.com/l3uddz/cloudplow) with [saltydk](https://github.com/saltydk) and other
+contributors. This fork builds on their work and is released under the same [GPL-3.0 license](LICENSE.md).
+
+To support the original authors:
+
+  - [GitHub Sponsors: l3uddz](https://github.com/sponsors/l3uddz)
+
+  - [GitHub Sponsors: saltydk](https://github.com/sponsors/saltydk)
+
+  - [Paypal: l3uddz](https://www.paypal.me/l3uddz)

@@ -4,7 +4,7 @@ import json
 
 from sqlitedict import SqliteDict
 
-TABLES = ('uploader_bans', 'syncer_bans', 'sa_bans')
+TABLES = ('uploader_bans', 'syncer_bans', 'sa_bans', 'download_clients')
 
 
 class Cache:

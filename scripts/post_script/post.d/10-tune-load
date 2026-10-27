@@ -56,7 +56,7 @@ if [ -n "${NAS_SSH:-}" ]; then
     fi
 fi
 
-read -r pressure transfers bwlimit < <(awk -v a="$local_pressure" -v b="${nas_pressure:-0}" -v tiers="$tiers" 'BEGIN {
+read -r _ transfers bwlimit < <(awk -v a="$local_pressure" -v b="${nas_pressure:-0}" -v tiers="$tiers" 'BEGIN {
     p = (a + 0 > b + 0) ? a : b
     n = split(tiers, t, " ")
     for (i = 1; i <= n; i++) {
@@ -85,5 +85,8 @@ fi
 dir=$(dirname "$CLOUDPLOW_OVERRIDES_FILE")
 mkdir -p "$dir"
 tmp=$(mktemp "$dir/.overrides.XXXXXX") || exit 1
-printf '%s\n' "$json" > "$tmp" && mv -f "$tmp" "$CLOUDPLOW_OVERRIDES_FILE" || { rm -f "$tmp"; exit 1; }
+if ! { printf '%s\n' "$json" > "$tmp" && mv -f "$tmp" "$CLOUDPLOW_OVERRIDES_FILE"; }; then
+    rm -f "$tmp"
+    exit 1
+fi
 echo "$summary"

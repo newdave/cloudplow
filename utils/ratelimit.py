@@ -41,10 +41,11 @@ class RateArbiter:
             return misc.lower_rate(plex, load)
         return plex or load or UNLIMITED
 
-    def set_plex(self, rate: Optional[str], throttler: Throttler) -> bool:
+    def set_plex(self, rate: Optional[str], throttler: Throttler, force: bool = False) -> bool:
+        """`force` pushes the rate even if it looks applied, e.g. after a new rclone process started."""
         with self._lock:
             self.plex_rate = rate
-            return self._sync(throttler)
+            return self._sync(throttler, force)
 
     def set_load(self, rate: Optional[str], throttler: Throttler) -> bool:
         with self._lock:
@@ -54,10 +55,10 @@ class RateArbiter:
             self.load_rate = rate
             return self._sync(throttler)
 
-    def _sync(self, throttler: Throttler) -> bool:
+    def _sync(self, throttler: Throttler, force: bool = False) -> bool:
         """Push the effective rate if rclone is not already running at it; True when they match."""
         wanted = self.effective()
-        if wanted == self.applied:
+        if wanted == self.applied and not force:
             return True
         if not throttler.throttle(wanted):
             return False

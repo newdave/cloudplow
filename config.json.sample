@@ -42,6 +42,12 @@
             "url": "http://localhost:7949"
         }
     },
+    "qbittorrent": {
+        "enabled": false,
+        "url": "http://qbittorrent:8080",
+        "username": "",
+        "password": ""
+    },
     "remotes": {
         "google": {
             "hidden_remote": "google:",
@@ -76,9 +82,11 @@
             },
             "rclone_command":"move",
             "remove_empty_dir_depth": 2,
+            "require_mounts": [],
             "sync_remote": "google:/Media",
             "upload_folder": "/mnt/local/Media",
-            "upload_remote": "google:/Media"
+            "upload_remote": "google:/Media",
+            "verified_move": false
         }
     },
     "syncer": {
@@ -91,6 +99,7 @@
             "opened_excludes": [
                 "/downloads/"
             ],
+            "opened_files_sudo": false,
             "schedule": {
                 "allowed_from": "04:00",
                 "allowed_until": "08:00",
@@ -98,6 +107,8 @@
             },
             "service_account_path":"/home/user/.config/cloudplow/service_accounts/",
             "post_script": "",
+            "rate_script": "",
+            "rate_script_interval": 60,
             "mover": {
                 "enabled": false,
                 "move_from_remote": "staging:Media",
