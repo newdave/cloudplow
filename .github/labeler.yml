@@ -1,0 +1,9 @@
+Docs:
+  - changed-files:
+      - any-glob-to-any-file: ["**/*.md", "assets/**"]
+Dependencies:
+  - changed-files:
+      - any-glob-to-any-file: ["requirements.txt"]
+CI:
+  - changed-files:
+      - any-glob-to-any-file: [".github/**", ".editorconfig"]

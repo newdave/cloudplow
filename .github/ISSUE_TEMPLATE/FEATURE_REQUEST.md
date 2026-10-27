@@ -8,7 +8,9 @@ labels: Feature Request
 A clear and concise description of the problem you're looking to solve.
 
 **Describe any solutions you think might work**
-A clear and concise description of any solutions or features you've considered.
+A clear and concise description of any solutions or features you've considered, including whether a
+[post script or rate script](https://github.com/newdave/cloudplow/blob/master/README.md#post-scripts-and-rate-limiting)
+could solve it.
 
 **Additional context**
-Add any other context or screenshots about the feature request here.
+Add any other context about the feature request here.

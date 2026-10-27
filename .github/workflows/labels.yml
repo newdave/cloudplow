@@ -1,0 +1,28 @@
+name: Labels
+
+# Create or update the repository's labels from .github/labels.json. Labels that are not in the file are left alone.
+on:
+  push:
+    branches: [master]
+    paths: [.github/labels.json]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sync labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          jq -c '.[]' .github/labels.json | while read -r label; do
+            name=$(jq -r '.name' <<<"$label")
+            color=$(jq -r '.color | ltrimstr("#")' <<<"$label")
+            description=$(jq -r '.description // ""' <<<"$label")
+            gh label create "$name" --color "$color" --description "$description" --force
+          done

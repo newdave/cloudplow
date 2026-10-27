@@ -1,42 +1,16 @@
 [
-  {
-    "name": "Bug",
-    "color": "#ee0701"
-  },
-  {
-    "name": "Docs",
-    "color": "#abfcee"
-  },
-  {
-    "name": "Duplicate",
-    "color": "#cccccc"
-  },
-  {
-    "name": "Expected Behavior",
-    "color": "#cccccc"
-  },
-  {
-    "name": "Feature Request",
-    "color": "#2f58b7"
-  },
-  {
-    "name": "Invalid",
-    "color": "#e6e6e6"
-  },
-  {
-    "name": "Support",
-    "color": "#cc317c"
-  },
-  {
-    "name": "Waiting For Info",
-    "color": "#13db34"
-  },
-  {
-    "name": "Wont Fix",
-    "color": "#ffffff"
-  },
-  {
-    "name": "Work In Progress",
-    "color": "#dd3087"
-  }
+  {"name": "Bug", "color": "#ee0701", "description": "Something is not working as documented"},
+  {"name": "CI", "color": "#5319e7", "description": "GitHub Actions and repository tooling"},
+  {"name": "Dependencies", "color": "#0366d6", "description": "Python packages or GitHub Actions versions"},
+  {"name": "Docs", "color": "#abfcee", "description": "README, changelog and other documentation"},
+  {"name": "Duplicate", "color": "#cccccc", "description": "This issue or pull request already exists"},
+  {"name": "Expected Behavior", "color": "#cccccc", "description": "Working as designed"},
+  {"name": "Feature Request", "color": "#2f58b7", "description": "New feature or improvement"},
+  {"name": "Invalid", "color": "#e6e6e6", "description": "Not a valid issue"},
+  {"name": "Stale", "color": "#fef2c0", "description": "No activity for a while; closes soon unless updated"},
+  {"name": "Support", "color": "#cc317c", "description": "Question about using Cloudplow"},
+  {"name": "Upstream", "color": "#fbca04", "description": "Changes from l3uddz/cloudplow"},
+  {"name": "Waiting For Info", "color": "#13db34", "description": "Needs more information from the reporter"},
+  {"name": "Wont Fix", "color": "#ffffff", "description": "This will not be worked on"},
+  {"name": "Work In Progress", "color": "#dd3087", "description": "Being worked on; never marked stale"}
 ]

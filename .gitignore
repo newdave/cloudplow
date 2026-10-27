@@ -35,3 +35,8 @@ venv/*
 # post_script
 /post_script.conf
 /overrides/
+
+# coverage
+.coverage
+coverage.json
+htmlcov/

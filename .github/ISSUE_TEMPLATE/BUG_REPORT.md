@@ -1,34 +1,29 @@
 ---
 name: Bug Report
-about: Create a report to help us improve Cloudplow
+about: Report something that is not working as documented
 labels: Bug
 ---
 
 **Describe the bug**
 A clear and concise description of what the bug is.
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+**To reproduce**
+The command or schedule that triggers it, and the relevant part of `config.json` (remove tokens, passwords and API keys).
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
-
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+**Expected behaviour**
+What you expected to happen.
 
 **Logs**
-Link to debug or trace log files.
+The relevant part of `cloudplow.log`, ideally with `--loglevel=DEBUG`. Common secrets are redacted automatically, but
+check before posting.
 
-You can enable debug mode by adding `--loglevel=DEBUG` to the run command (e.g. systemd).
+**System information**
 
-**System Information**
-
- - Cloudplow Version: [e.g. Master (latest), Develop (latest)]
- - Operating System: [e.g. Ubuntu Server 16.04 LTS]
+- Cloudplow commit (`git -C /opt/cloudplow rev-parse --short HEAD`):
+- Python version (`python3 --version`):
+- Rclone version (`rclone version`):
+- Operating system:
+- Upload destination (cloud remote, NFS, mergerfs branch, ...):
 
 **Additional context**
-Add any other context about the problem here.
+Anything else that might help.

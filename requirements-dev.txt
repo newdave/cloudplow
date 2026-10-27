@@ -1,0 +1,2 @@
+# Development and CI only; not needed to run Cloudplow
+coverage==7.6.1

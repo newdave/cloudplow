@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # official images keep end-of-life Pythons available; the full image includes git, which GitPython needs
+    container: python:${{ matrix.python-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends rclone
+          python -m pip install --root-user-action=ignore -r requirements.txt
+      # unprivileged, so the verified-move tests can stage an unreadable file
+      - name: Run tests
+        run: |
+          useradd --create-home tester
+          chown -R tester .
+          su tester -c "python -m unittest discover -s tests -v"
+
+  coverage:
+    runs-on: ubuntu-latest
+    container: python:3.12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends rclone
+          python -m pip install --root-user-action=ignore -r requirements.txt -r requirements-dev.txt
+          useradd --create-home tester
+      - name: Measure coverage
+        run: |
+          chown -R tester .
+          su tester -c "python -m coverage run -m unittest discover -s tests && python -m coverage json -o /tmp/head.json && python -m coverage report"
+      # the base is measured with this branch's .coveragerc so both numbers count the same files
+      - name: Measure base coverage
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git worktree add --detach /tmp/base "$BASE_SHA"
+          cp .coveragerc /tmp/base/.coveragerc
+          chown -R tester /tmp/base
+          su tester -c "cd /tmp/base && python -m coverage run -m unittest discover -s tests && python -m coverage json -o /tmp/base.json" \
+            || echo "::warning::Could not measure coverage on the base commit; only reporting this branch's coverage."
+      - name: Check coverage did not drop
+        run: |
+          if [ -f /tmp/base.json ]; then
+            python .github/scripts/coverage-gate.py /tmp/head.json /tmp/base.json
+          else
+            python .github/scripts/coverage-gate.py /tmp/head.json
+          fi
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck bundled scripts
+        run: shellcheck scripts/post_script/post.sh scripts/post_script/post.d/* .github/scripts/*.sh
+
+  # the one check to require in branch protection: passes only when every job above passed
+  gate:
+    name: CI gate
+    if: always()
+    needs: [test, coverage, shellcheck]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every job to pass
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "Job results: $RESULTS"
+          if [ "$(jq -r 'map(select(. != "success")) | length' <<<"$RESULTS")" -ne 0 ]; then
+            echo "::error::A required CI job did not succeed."
+            exit 1
+          fi

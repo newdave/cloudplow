@@ -1,37 +1,67 @@
-## Contributing
+# Contributing
 
-Guide below will explain the process of submitting a pull request (PR).
+Thanks for helping improve Cloudplow. Bug reports, fixes and features are all welcome.
 
-1. Fork it.
+## Before you start
 
-1. Clone your forked project:
+- Search the [existing issues](https://github.com/newdave/cloudplow/issues) first.
+- For anything bigger than a small fix, open an issue to discuss it before writing the code.
+- Questions about upstream behaviour that this fork has not changed are best asked at
+  [l3uddz/cloudplow](https://github.com/l3uddz/cloudplow).
 
-   ```
-   git clone http://github.com/<your_github_username>/cloudplow
-   ```
+## Development setup
 
-1. Create a feature branch off of the **develop** branch:
+```
+git clone https://github.com/<your_github_username>/cloudplow
+cd cloudplow
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+```
 
-   ```
-   git checkout -b 'feature/my-new-feature' develop
-   ```
+Cloudplow supports Python 3.8 and later, so avoid syntax and standard library features newer than 3.8.
 
-1. Keep up to date with latest **develop** branch changes:
+## Making a change
 
-   ```
-   git pull --rebase upstream develop
-   ```
-
-1. Commit your changes:
-
-   ```
-   git commit -am 'Added some feature'
-   ```
-
-1. Push commits to the feature branch:
+1. Create a branch off `master`:
 
    ```
-   git push origin feature/my-new-feature
+   git checkout -b fix/short-description master
    ```
 
-1. Submit feature branch as a PR to _our_ **develop** branch.
+2. Make your change, with tests in `tests/` for new behaviour or fixed bugs.
+
+3. Run the checks that CI runs:
+
+   ```
+   venv/bin/python3 -m unittest discover -s tests
+   shellcheck scripts/post_script/post.sh scripts/post_script/post.d/*
+   ```
+
+   Install `rclone` and run the tests as a regular user (not root), otherwise the verified-move tests are skipped.
+
+   CI also fails a pull request that lowers total test coverage. To check it locally:
+
+   ```
+   venv/bin/pip install -r requirements-dev.txt
+   venv/bin/python3 -m coverage run -m unittest discover -s tests
+   venv/bin/python3 -m coverage report
+   ```
+
+4. Update the documentation: the [README](README.md) for new or changed settings, `config.json.sample` for new
+   config keys, and the `Unreleased` section of the [changelog](CHANGELOG.md).
+
+5. Keep `master` current while you work:
+
+   ```
+   git pull --rebase https://github.com/newdave/cloudplow master
+   ```
+
+6. Push your branch and open a pull request against `master`.
+
+## Guidelines
+
+- Match the surrounding code: type hints, `logging.getLogger(__name__)`, and external commands built as argument lists
+  (never shell strings).
+- Never log secrets. The log formatter redacts common token and credential patterns, but do not rely on it.
+- Changes that delete or move user files need a test showing what happens when a file changes during the operation.
+- Write commit messages that explain why the change was made, not only what changed.

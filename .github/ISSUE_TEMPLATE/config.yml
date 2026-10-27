@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/newdave/cloudplow/blob/master/README.md
+    about: Every setting is documented in the README. Check it first.
+  - name: Upstream Cloudplow
+    url: https://github.com/l3uddz/cloudplow
+    about: For questions about upstream behaviour that this fork has not changed.
+  - name: Security vulnerability
+    url: https://github.com/newdave/cloudplow/security/advisories/new
+    about: Report security problems privately, not as a public issue.
