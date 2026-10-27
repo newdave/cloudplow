@@ -1,12 +1,10 @@
+from __future__ import annotations
+
 import logging
 import random
+from typing import Any, List, Mapping, Optional, Tuple
 
 from utils.rclone import RcloneSyncer
-
-try:
-    from shlex import quote as cmd_quote
-except ImportError:
-    from pipes import quote as cmd_quote
 
 log = logging.getLogger("local")
 
@@ -14,66 +12,50 @@ log = logging.getLogger("local")
 class Local:
     NAME = 'Local'
 
-    def __init__(self, tool_path, from_config, to_config, **kwargs):
+    def __init__(self, tool_path: str, from_config: Mapping[str, Any], to_config: Mapping[str, Any],
+                 **kwargs: Any):
         self.tool_path = tool_path
         self.sync_from_config = from_config
         self.sync_to_config = to_config
         self.kwargs = kwargs
-        self.instance_id = None
-        self.rclone_config_path = None
+        self.instance_id: Optional[int] = None
+        self.rclone_config_path: Optional[str] = None
         self.syncer_name = kwargs.get('syncer_name', 'Unknown Syncer')
+        self.instance_destroy = False
 
-        log.info(f"Initialized Local syncer agent for {self.syncer_name} - {self.sync_from_config['sync_remote']} -> {self.sync_to_config['sync_remote']} using tool: {self.tool_path}")
-        return
+        log.info("Initialized Local syncer agent for %s - %s -> %s using tool: %s", self.syncer_name,
+                 from_config['sync_remote'], to_config['sync_remote'], tool_path)
 
-    def startup(self, **kwargs):
-        if 'name' not in kwargs:
-            log.error("You must provide an name for this instance")
-            return False, None
-
-        # fake instance_id
+    def startup(self, name: str) -> Tuple[bool, Optional[int]]:
+        # local syncs need no instance, use a placeholder id
         self.instance_id = random.randint(1, 10000)
-
         return True, self.instance_id
 
-    def setup(self, **kwargs):
+    def setup(self, rclone_config: str) -> bool:
         if not self.instance_id:
             log.error("Setup was called, but no instance_id was found, aborting...")
             return False
-        if 'rclone_config' not in kwargs:
-            log.error("Setup was called, but no rclone_config was found, aborting...")
-            self.destroy()
-            return False
-
-        # store the rclone_config path provided in kwargs
-        self.rclone_config_path = kwargs['rclone_config']
-
+        self.rclone_config_path = rclone_config
         return True
 
-    def destroy(self):
+    def destroy(self) -> bool:
         if not self.instance_id:
             log.error("Destroy was called, but no instance_id was found, aborting...")
             return False
-
         return True
 
-    def sync(self, **kwargs):
+    def sync(self, **kwargs: Any) -> Tuple[bool, Optional[int], Optional[str]]:
         if not self.instance_id:
             log.error("Sync was called, but no instance_id was found, aborting...")
             return False, None, None
-        kwargs.update(self.kwargs)
 
-        # create RcloneSyncer object
-        rclone = RcloneSyncer(self.sync_from_config, self.sync_to_config, **kwargs)
-
-        # start sync
-        log.info(f"Starting sync for instance: {self.instance_id}")
+        rclone = RcloneSyncer(self.sync_from_config, self.sync_to_config, **{**kwargs, **self.kwargs})
+        log.info("Starting sync for instance: %s", self.instance_id)
         resp, delayed_check, delayed_trigger = rclone.sync(self._wrap_command)
-        log.info(f"Finished syncing for instance: {self.instance_id}")
-
+        log.info("Finished syncing for instance: %s", self.instance_id)
         return resp, delayed_check, delayed_trigger
 
     # internals
-
-    def _wrap_command(self, command):
-        return f"{cmd_quote(self.tool_path)} {command[7:]} --config={cmd_quote(self.rclone_config_path)}"
+    def _wrap_command(self, args: List[str]) -> List[str]:
+        # swap the bare 'rclone' for the configured binary and point it at our config
+        return [self.tool_path, *args[1:], f'--config={self.rclone_config_path}']

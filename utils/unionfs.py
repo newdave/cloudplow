@@ -1,121 +1,99 @@
+from __future__ import annotations
+
 import concurrent.futures
 import logging
+from typing import Any, List, Mapping, Optional, Tuple
 
 from . import path
 from .rclone import RcloneUploader
 
 log = logging.getLogger('unionfs')
 
+HIDDEN_SUFFIX = '_HIDDEN~'
+
 
 class UnionfsHiddenFolder:
-    def __init__(self, hidden_folder, dry_run, rclone_binary_path, rclone_config_path):
+    def __init__(self, hidden_folder: str, dry_run: bool, rclone_binary_path: str, rclone_config_path: str):
         self.unionfs_fuse = hidden_folder
         self.dry_run = dry_run
-        self.hidden_files = self.__files()
-        self.hidden_folders = self.__folders()
         self.rclone_binary_path = rclone_binary_path
         self.rclone_config_path = rclone_config_path
+        self.hidden_files = self._find(files=True)
+        self.hidden_folders = self._find(files=False)
 
-    def clean_remote(self, name, remote):
-        """
-        Delete hidden_files and hidden_folders from remote
-
-        :param name: name of the rclone remote
-        :param remote: rclone remote item from config.json
-        :return: True or False based on whether clean was successful
-        """
-        delete_success = 0
-        delete_failed = 0
-
+    def clean_remote(self, name: str, remote: Mapping[str, Any]) -> Tuple[bool, int, int]:
+        """Delete hidden files and folders from the remote; returns (completed, deleted, failed)."""
+        deleted = failed = 0
+        rclone = RcloneUploader(name, remote, self.rclone_binary_path, self.rclone_config_path,
+                                dry_run=self.dry_run)
         try:
-            rclone = RcloneUploader(name, remote, self.rclone_binary_path, self.rclone_config_path, self.dry_run)
-            # clean hidden files from remote using threadpool
             if self.hidden_files:
+                log.info("Cleaning %d hidden file(s) from remote: %s", len(self.hidden_files), name)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
-                    log.info(f"Cleaning {len(self.hidden_files)} hidden file(s) from remote: {name}")
-                    future_to_remote_file = {}
+                    futures = {}
                     for hidden_file in self.hidden_files:
-                        remote_file = self.__hidden2remote(remote, hidden_file)
+                        remote_file = self._hidden2remote(remote, hidden_file)
                         if remote_file:
-                            future_to_remote_file[executor.submit(rclone.delete_file, remote_file)] = remote_file
+                            futures[executor.submit(rclone.delete_file, remote_file)] = remote_file
                         else:
-                            log.error(f"Failed mapping file '{hidden_file}' to a remote file")
-                            delete_failed += 1
+                            failed += 1
+                    for future in concurrent.futures.as_completed(futures):
+                        if future.result():
+                            log.info("Removed file %r", futures[future])
+                            deleted += 1
+                        else:
+                            log.error("Failed removing file %r", futures[future])
+                            failed += 1
 
-                    for future in concurrent.futures.as_completed(future_to_remote_file):
-                        remote_file = future_to_remote_file[future]
-                        try:
-                            if future.result():
-                                log.info(f"Removed file '{remote_file}'")
-                                delete_success += 1
-                            else:
-                                log.error(f"Failed removing file '{remote_file}'")
-                                delete_failed += 1
-                        except Exception:
-                            log.exception("Exception processing result from rclone delete file future for '{remote_file}': ")
-                            delete_failed += 1
-
-            # clean hidden folders from remote
             if self.hidden_folders:
-                log.info(f"Cleaning {len(self.hidden_folders)} hidden folder(s) from remote: {name}")
+                log.info("Cleaning %d hidden folder(s) from remote: %s", len(self.hidden_folders), name)
                 for hidden_folder in self.hidden_folders:
-                    remote_folder = self.__hidden2remote(remote, hidden_folder)
+                    remote_folder = self._hidden2remote(remote, hidden_folder)
                     if remote_folder and rclone.delete_folder(remote_folder):
-                        log.info(f"Removed folder '{remote_folder}'")
-                        delete_success += 1
+                        log.info("Removed folder %r", remote_folder)
+                        deleted += 1
                     else:
-                        log.error(f"Failed removing folder '{remote_folder}'")
-                        delete_failed += 1
+                        log.error("Failed removing folder %r", remote_folder)
+                        failed += 1
 
             if self.hidden_folders or self.hidden_files:
-                log.info(f"Completed cleaning hidden(s) from remote: {name}")
-                log.info(f"{delete_success} items were deleted, {delete_failed} items failed to delete")
-
-            return True, delete_success, delete_failed
+                log.info("Completed cleaning hidden(s) from remote: %s. %d items were deleted, %d items failed",
+                         name, deleted, failed)
+            return True, deleted, failed
 
         except Exception:
-            log.exception(f"Exception cleaning hidden(s) from {self.unionfs_fuse}: ")
+            log.exception("Exception cleaning hidden(s) from %s: ", self.unionfs_fuse)
+        return False, deleted, failed
 
-        return False, delete_success, delete_failed
-
-    def remove_local_hidden(self):
-        if len(self.hidden_files):
+    def remove_local_hidden(self) -> None:
+        if self.hidden_files:
             path.delete(self.hidden_files)
-            log.info(f"Removed {len(self.hidden_files)} local hidden file(s) from disk")
-        if len(self.hidden_folders):
+            log.info("Removed %d local hidden file(s) from disk", len(self.hidden_files))
+        if self.hidden_folders:
             path.delete(self.hidden_folders)
-            log.info(f"Removed {len(self.hidden_folders)} local hidden folder(s) from disk")
-        return
+            log.info("Removed %d local hidden folder(s) from disk", len(self.hidden_folders))
 
-    def remove_empty_dirs(self):
-        path.remove_empty_dirs(self.unionfs_fuse, 1)
-        log.info(f"Removed empty directories from '{self.unionfs_fuse}'")
+    def remove_empty_dirs(self) -> None:
+        if path.remove_empty_dirs(self.unionfs_fuse, 1):
+            log.info("Removed empty directories from %r", self.unionfs_fuse)
 
     # internals
-    def __files(self):
-        hidden_files = []
+    def _find(self, files: bool) -> List[str]:
+        kind = 'files' if files else 'folders'
         try:
-            hidden_files = path.find_items(self.unionfs_fuse, '_HIDDEN~')
-            log.info(f"Found {len(hidden_files)} hidden files in {self.unionfs_fuse}")
-        except Exception:
-            log.exception(f"Exception finding hidden files for {self.unionfs_fuse}: ")
-            hidden_files = None
-        return hidden_files
+            found = path.find_items(self.unionfs_fuse, HIDDEN_SUFFIX, files=files)
+        except OSError:
+            log.exception("Exception finding hidden %s for %s: ", kind, self.unionfs_fuse)
+            return []
+        log.info("Found %d hidden %s in %s", len(found), kind, self.unionfs_fuse)
+        return found
 
-    def __folders(self):
-        try:
-            hidden_folders = path.find_items(self.unionfs_fuse, '_HIDDEN~')
-            log.info(f"Found {len(hidden_folders)} hidden folders in {self.unionfs_fuse}")
-        except Exception:
-            log.exception(f"Exception finding hidden folders for {self.unionfs_fuse}: ")
-            hidden_folders = None
-        return hidden_folders
-
-    def __hidden2remote(self, remote, hidden_path):
-        try:
-            remote_path = hidden_path.replace(self.unionfs_fuse, remote['hidden_remote']).rstrip('_HIDDEN~')
-            log.debug(f"Mapped '{hidden_path}' to '{remote_path}'")
-            return remote_path
-        except Exception:
-            log.exception(f"Exception mapping hidden file '{hidden_path}' to its rclone remote path")
-        return None
+    def _hidden2remote(self, remote: Mapping[str, Any], hidden_path: str) -> Optional[str]:
+        if not remote.get('hidden_remote') or not hidden_path.startswith(self.unionfs_fuse):
+            log.error("Failed mapping %r to a remote path", hidden_path)
+            return None
+        remote_path = remote['hidden_remote'] + hidden_path[len(self.unionfs_fuse):]
+        if remote_path.endswith(HIDDEN_SUFFIX):
+            remote_path = remote_path[:-len(HIDDEN_SUFFIX)]
+        log.debug("Mapped %r to %r", hidden_path, remote_path)
+        return remote_path

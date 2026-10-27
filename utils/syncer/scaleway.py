@@ -1,223 +1,143 @@
+from __future__ import annotations
+
 import logging
+import shlex
 import time
+from typing import Any, List, Mapping, Optional, Tuple
 
 from utils import process
 from utils.rclone import RcloneSyncer
 
-try:
-    from shlex import quote as cmd_quote
-except ImportError:
-    from pipes import quote as cmd_quote
-
 log = logging.getLogger("scaleway")
+
+BOOT_WAIT_SECONDS = 60
+INSTALL_UNZIP = "apt-get -qq update && apt-get -y -qq install unzip && which unzip"
+INSTALL_RCLONE = ("cd ~ && curl -sO https://downloads.rclone.org/rclone-current-linux-amd64.zip && "
+                  "unzip -oq rclone-current-linux-amd64.zip && cd rclone-*-linux-amd64 && "
+                  "cp -rf rclone /usr/bin/ && cd ~ && rm -rf rclone-* && chown root:root /usr/bin/rclone && "
+                  "chmod 755 /usr/bin/rclone && mkdir -p /root/.config/rclone && which rclone")
 
 
 class Scaleway:
     NAME = 'Scaleway'
 
-    def __init__(self, tool_path, from_config, to_config, **kwargs):
+    def __init__(self, tool_path: str, from_config: Mapping[str, Any], to_config: Mapping[str, Any],
+                 **kwargs: Any):
         self.tool_path = tool_path
         self.sync_from_config = from_config
         self.sync_to_config = to_config
         self.kwargs = kwargs
-        self.instance_id = None
-
-        # parse region from kwargs (default France)
+        self.instance_id: Optional[str] = None
         self.region = kwargs.get('region', 'par1')
-        # parse type from kwargs (default X64-2GB)
         self.type = kwargs.get('type', 'X64-2GB')
-        # parse image from kwargs (default Ubuntu 16.04)
         self.image = kwargs.get('image', 'ubuntu-xenial')
-        # parse instance_destroy from kwargs (default True)
         self.instance_destroy = kwargs.get('instance_destroy', True)
         self.syncer_name = kwargs.get('syncer_name', 'Unknown Syncer')
 
-        log.info(f"Initialized Scaleway syncer agent for {self.syncer_name} - {self.sync_from_config['sync_remote']} -> {self.sync_to_config['sync_remote']} using tool: {self.tool_path}")
-        return
+        log.info("Initialized Scaleway syncer agent for %s - %s -> %s using tool: %s", self.syncer_name,
+                 from_config['sync_remote'], to_config['sync_remote'], tool_path)
 
-    def startup(self, **kwargs):
-        if 'name' not in kwargs:
-            log.error("You must provide an name for this instance")
-            return False, None
-
-        # check if instance exists
-        cmd = f"{cmd_quote(self.tool_path)} ps -a"
-        resp = process.popen(cmd)
+    def startup(self, name: str) -> Tuple[bool, Optional[str]]:
+        resp = process.check_output([self.tool_path, 'ps', '-a'])
         if not resp or 'zone' not in resp.lower():
-            log.error(f"Unexpected response while checking if instance {kwargs['name']} exists: {resp}")
+            log.error("Unexpected response while checking if instance %s exists: %s", name, resp)
             return False, self.instance_id
 
-        if self.instance_destroy or kwargs['name'].lower() not in resp.lower():
-            # create instance
-            cmd = f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} run -d --name={cmd_quote(kwargs['name'])} --ipv6 --commercial-type={cmd_quote(self.type)} {cmd_quote(self.image)}"
-
-            resp = self.start_instance(cmd, "Creating new instance...")
+        if self.instance_destroy or name.lower() not in resp.lower():
+            log.debug("Creating new instance...")
+            resp = self._scw('run', '-d', f'--name={name}', '--ipv6', f'--commercial-type={self.type}', self.image)
             if not resp or 'failed' in resp.lower():
-                log.error(f"Unexpected response while creating instance: {resp}")
+                log.error("Unexpected response while creating instance: %s", resp)
                 return False, self.instance_id
-            else:
-                self.instance_id = resp
-            log.info(f"Created new instance: {self.instance_id}")
+            self.instance_id = resp
+            log.info("Created new instance: %s", self.instance_id)
         else:
-            # start existing instance
-            cmd = f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} start {cmd_quote(kwargs['name'])}"
-
-            resp = self.start_instance(cmd, "Starting instance...")
+            log.debug("Starting instance...")
+            resp = self._scw('start', name)
             if not resp or 'failed' in resp.lower():
-                log.error(f"Unexpected response while creating instance: {resp}")
-                return False, kwargs['name']
-            else:
-                self.instance_id = kwargs['name']
-            log.info(f"Started existing instance: {self.instance_id}")
+                log.error("Unexpected response while starting instance: %s", resp)
+                return False, name
+            self.instance_id = name
+            log.info("Started existing instance: %s", self.instance_id)
 
-        # wait for instance to finish booting
         log.info("Waiting for instance to finish booting...")
-        time.sleep(60)
-        cmd = f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} exec -w {cmd_quote(self.instance_id)} {cmd_quote('uname -a')}"
-
-        log.debug(f"Using: {cmd}")
-
-        resp = process.popen(cmd)
+        time.sleep(BOOT_WAIT_SECONDS)
+        resp = self._scw('exec', '-w', self.instance_id, 'uname -a')
         if not resp or 'gnu/linux' not in resp.lower():
-            log.error(f"Unexpected response while waiting for instance to boot: {resp}")
+            log.error("Unexpected response while waiting for instance to boot: %s", resp)
             self.destroy()
             return False, self.instance_id
 
-        log.info(f"Instance has finished booting, uname: {resp}")
+        log.info("Instance has finished booting, uname: %s", resp)
         return True, self.instance_id
 
-    def start_instance(self, cmd, arg1):
-        log.debug(f"Using: {cmd}")
-
-        log.debug(arg1)
-        return process.popen(cmd)
-
-    def setup(self, **kwargs):
+    def setup(self, rclone_config: str) -> bool:
         if not self.instance_id:
             log.error("Setup was called, but no instance_id was found, aborting...")
             return False
-        if 'rclone_config' not in kwargs:
-            log.error("Setup was called, but no rclone_config was found, aborting...")
-            self.destroy()
-            return False
 
-        # install unzip
-        cmd_exec = "apt-get -qq update && apt-get -y -qq install unzip && which unzip"
-        cmd = f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} exec {cmd_quote(self.instance_id)} {cmd_quote(cmd_exec)}"
-
-        log.debug(f"Using: {cmd}")
-
-        log.debug(f"Installing rclone to instance: {self.instance_id}")
-        resp = process.popen(cmd)
+        resp = self._scw('exec', self.instance_id, INSTALL_UNZIP)
         if not resp or '/usr/bin/unzip' not in resp.lower():
-            return self.error_handling(f"Unexpected response while installing unzip: {resp}")
-
+            return self._fail(f"Unexpected response while installing unzip: {resp}")
         log.info("Installed unzip")
 
-        # install rclone to instance
-        cmd_exec = "cd ~ && curl -sO https://downloads.rclone.org/rclone-current-linux-amd64.zip && " \
-                   "unzip -oq rclone-current-linux-amd64.zip && cd rclone-*-linux-amd64 && " \
-                   "cp -rf rclone /usr/bin/ && cd ~ && rm -rf rclone-* && chown root:root /usr/bin/rclone && " \
-                   "chmod 755 /usr/bin/rclone && mkdir -p /root/.config/rclone && which rclone"
-        cmd = f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} exec {cmd_quote(self.instance_id)} {cmd_quote(cmd_exec)}"
-
-        log.debug(f"Using: {cmd}")
-
-        log.debug(f"Installing rclone to instance: {self.instance_id}")
-        resp = process.popen(cmd)
+        resp = self._scw('exec', self.instance_id, INSTALL_RCLONE)
         if not resp or '/usr/bin/rclone' not in resp.lower():
-            return self.error_handling(f"Unexpected response while installing rclone: {resp}")
-
+            return self._fail(f"Unexpected response while installing rclone: {resp}")
         log.info("Installed rclone")
 
-        # copy rclone.conf to instance
-        cmd = f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} cp {cmd_quote(kwargs['rclone_config'])} {cmd_quote(self.instance_id)}:/root/.config/rclone/"
-
-        log.debug(f"Using: {cmd}")
-
-        log.debug(f"Copying rclone config {kwargs['rclone_config']} to instance: {self.instance_id}")
-        resp = process.popen(cmd)
+        resp = self._scw('cp', rclone_config, f'{self.instance_id}:/root/.config/rclone/')
         if resp is None or len(resp) >= 2:
-            return self.error_handling(f"Unexpected response while copying rclone config: {resp}")
-
+            return self._fail(f"Unexpected response while copying rclone config: {resp}")
         log.info("Copied across rclone.conf")
 
-        log.info(f"Successfully setup instance: {self.instance_id}")
+        log.info("Successfully setup instance: %s", self.instance_id)
         return True
 
-    def error_handling(self, arg0, resp):
-        log.error(arg0, resp)
-        self.destroy()
-        return False
-
-    def destroy(self):
+    def destroy(self) -> bool:
         if not self.instance_id:
             log.error("Destroy was called, but no instance_id was found, aborting...")
             return False
 
-        if self.instance_destroy:
-            # destroy the instance
-            cmd = f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} rm -f {cmd_quote(self.instance_id)}"
+        action = 'rm' if self.instance_destroy else 'stop'
+        args = ('rm', '-f', self.instance_id) if self.instance_destroy else ('stop', self.instance_id)
+        resp = self._scw(*args)
+        if not resp or self.instance_id.lower() not in resp.lower():
+            log.error("Unexpected response while running %s on instance %s: %s", action, self.instance_id, resp)
+            return False
 
-            log.debug(f"Using: {cmd}")
-
-            log.debug(f"Destroying instance: {self.instance_id}")
-            resp = process.popen(cmd)
-            if not resp or self.instance_id.lower() not in resp.lower():
-                log.error(f"Unexpected response while destroying instance {self.instance_id}: {resp}")
-                return False
-
-            log.info(f"Destroyed instance: {self.instance_id}")
-        else:
-            # stop the instance
-            cmd = f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} stop {cmd_quote(self.instance_id)}"
-
-            log.debug(f"Using: {cmd}")
-
-            log.debug(f"Stopping instance: {self.instance_id}")
-            resp = process.popen(cmd)
-            if not resp or self.instance_id.lower() not in resp.lower():
-                log.error(f"Unexpected response while stopping instance {self.instance_id}: {resp}")
-                return False
-
-            log.info(f"Stopped instance: {self.instance_id}")
-
+        log.info("%s instance: %s", 'Destroyed' if self.instance_destroy else 'Stopped', self.instance_id)
         return True
 
-    def sync(self, **kwargs):
+    def sync(self, rclone_config: str, **kwargs: Any) -> Tuple[bool, Optional[int], Optional[str]]:
         if not self.instance_id:
             log.error("Sync was called, but no instance_id was found, aborting...")
             return False, None, None
-        kwargs.update(self.kwargs)
 
-        # create RcloneSyncer object
-        rclone = RcloneSyncer(self.sync_from_config, self.sync_to_config, **kwargs)
-
-        # start sync
-        log.info(f"Starting sync for instance: {self.instance_id}")
+        rclone = RcloneSyncer(self.sync_from_config, self.sync_to_config, **{**kwargs, **self.kwargs})
+        log.info("Starting sync for instance: %s", self.instance_id)
         resp, delayed_check, delayed_trigger = rclone.sync(self._wrap_command)
-        log.info(f"Finished syncing for instance: {self.instance_id}")
+        log.info("Finished syncing for instance: %s", self.instance_id)
 
-        # copy rclone.conf back from instance (in-case refresh tokens were used) (Copy seems not to be working atm)
-        # cmd = "%s --region=%s cp %s:/root/.config/rclone/rclone.conf %s" % (
-        #     cmd_quote(self.tool_path), cmd_quote(self.region), cmd_quote(self.instance_id),
-        #     cmd_quote(os.path.dirname(kwargs['rclone_config'])))
-
-        # Use exec cat > rclone config until cp is resolved
-        cmd = f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} exec {cmd_quote(self.instance_id)} cat /root/.config/rclone/rclone.conf > {cmd_quote(kwargs['rclone_config'])}"
-
-        log.debug(f"Using: {cmd}")
-
-        log.debug(f"Copying rclone config from instance {self.instance_id} to: {kwargs['rclone_config']}")
-        config_resp = process.popen(cmd, shell=True)
-        if config_resp is None or len(config_resp) >= 2:
-            log.error(f"Unexpected response while copying rclone config from instance: {config_resp}")
-        else:
+        # copy rclone.conf back from the instance in case refresh tokens were rotated
+        remote_config = self._scw('exec', self.instance_id, 'cat /root/.config/rclone/rclone.conf')
+        if remote_config:
+            with open(rclone_config, 'w') as fp:
+                fp.write(remote_config + '\n')
             log.info("Copied rclone.conf from instance")
+        else:
+            log.error("Unexpected response while copying rclone config from instance: %s", remote_config)
 
         return resp, delayed_check, delayed_trigger
 
     # internals
+    def _scw(self, *args: str) -> Optional[str]:
+        return process.check_output([self.tool_path, f'--region={self.region}', *args])
 
-    def _wrap_command(self, command):
-        return f"{cmd_quote(self.tool_path)} --region={cmd_quote(self.region)} exec {cmd_quote(self.instance_id)} {cmd_quote(command)}"
+    def _fail(self, message: str) -> bool:
+        log.error(message)
+        self.destroy()
+        return False
+
+    def _wrap_command(self, args: List[str]) -> List[str]:
+        return [self.tool_path, f'--region={self.region}', 'exec', self.instance_id, shlex.join(args)]

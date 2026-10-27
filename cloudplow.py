@@ -1,823 +1,586 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import contextlib
 import logging
 import os
 import sys
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 from multiprocessing import Process
+from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 import schedule
 
-from utils import config, lock, path, decorators, version, misc
+from utils import config, decorators, lock, misc, version
 from utils.cache import Cache
 from utils.notifications import Notifications
 from utils.nzbget import Nzbget
-from utils.sabnzbd import Sabnzbd
 from utils.plex import Plex
-from utils.rclone import RcloneThrottler, RcloneMover
+from utils.rclone import RcloneMover, RcloneThrottler
+from utils.sabnzbd import Sabnzbd
 from utils.syncer import Syncer
-from utils.threads import Thread
 from utils.unionfs import UnionfsHiddenFolder
-from utils.uploader import Uploader
+from utils.uploader import Uploader, UploadResult
 
-############################################################
-# INIT
-############################################################
+log = logging.getLogger('cloudplow')
 
-# Logging
-log_formatter = logging.Formatter(u'%(asctime)s - %(levelname)-10s - %(name)-20s - %(funcName)-30s - %(message)s')
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-
-# Set schedule logger to ERROR
-logging.getLogger('schedule').setLevel(logging.ERROR)
-logging.getLogger("requests").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("sqlitedict").setLevel(logging.WARNING)
-
-# Set console logger
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(log_formatter)
-root_logger.addHandler(console_handler)
-
-# Init config
-conf = config.Config()
-
-# Set file logger
-file_handler = RotatingFileHandler(
-    conf.settings['logfile'],
-    maxBytes=1024 * 1024 * 5,
-    backupCount=5,
-    encoding='utf-8'
-)
-file_handler.setFormatter(log_formatter)
-root_logger.addHandler(file_handler)
-
-# Set chosen logging level
-root_logger.setLevel(conf.settings['loglevel'])
-log = root_logger.getChild('cloudplow')
-
-# Load config from disk
-conf.load()
-
-# Init Cache class
-cache = Cache(conf.settings['cachefile'])
-
-# Init Notifications class
-notify = Notifications()
-
-# Init Syncer class
-syncer = Syncer(conf.configs)
-
-# Ensure lock folder exists
-lock.ensure_lock_folder()
-
-# Init thread class
-thread = Thread()
-
-# Logic vars
-uploader_delay = cache.get_cache('uploader_bans')
-syncer_delay = cache.get_cache('syncer_bans')
-plex_monitor_thread = None
-sa_delay = cache.get_cache('sa_bans')
+LOG_FORMAT = '%(asctime)s - %(levelname)-10s - %(name)-20s - %(funcName)-30s - %(message)s'
+MOVER_REQUIRED_SETTINGS = ('move_from_remote', 'move_to_remote', 'rclone_extras')
+RCLONE_STARTUP_GRACE_SECONDS = 15
+SECONDS_PER_HOUR = 60 * 60
 
 
-############################################################
-# MISC FUNCS
-############################################################
+def setup_logging(logfile: str, loglevel: str) -> None:
+    formatter = logging.Formatter(LOG_FORMAT)
+    root_logger = logging.getLogger()
+    for handler in (logging.StreamHandler(sys.stdout),
+                    RotatingFileHandler(logfile, maxBytes=5 * 1024 * 1024, backupCount=5, encoding='utf-8')):
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+    root_logger.setLevel(loglevel)
 
-def init_notifications():
-    try:
-        for notification_name, notification_config in conf.configs['notifications'].items():
-            notify.load(**notification_config)
-    except Exception:
-        log.exception("Exception initializing notification agents: ")
-    return
+    for noisy, level in (('schedule', logging.ERROR), ('requests', logging.WARNING),
+                         ('urllib3', logging.WARNING), ('sqlitedict', logging.WARNING)):
+        logging.getLogger(noisy).setLevel(level)
 
 
-def init_service_accounts():
-    global sa_delay
-    global uploader_delay
-    log.debug("Start initializing of service accounts.")
-    for uploader_remote, uploader_config in conf.configs['uploader'].items():
-        if uploader_remote not in sa_delay:
-            sa_delay[uploader_remote] = None
-        if 'service_account_path' in uploader_config and os.path.exists(uploader_config['service_account_path']):
-            # If service_account path provided, loop over the service account files and provide
-            # one at a time when starting the uploader. If upload completes successfully, do not attempt
-            # to use the other accounts
-            accounts = {os.path.join(os.path.normpath(uploader_config['service_account_path']),
-                                     sa_file): None for sa_file in
-                        os.listdir(os.path.normpath(uploader_config['service_account_path'])) if
-                        sa_file.endswith(".json")}
-            current_accounts = sa_delay[uploader_remote]
-            if current_accounts is not None:
-                # Service account files may have moved, invalidate any missing cached accounts.
-                cached_accounts = list(current_accounts)
-                for cached_account in cached_accounts:
-                    log.debug(f"Checking for cached service account file '{cached_account}' for remote '{uploader_remote}'")
-                    if not cached_account.startswith(os.path.normpath(uploader_config['service_account_path'])):
-                        log.debug(f"Cached service account file '{cached_account}' for remote '{uploader_remote}' is not located in specified service_account_path ('{uploader_config['service_account_path']}'). Removing from available accounts.")
-                        current_accounts.pop(cached_account)
-                    if not os.path.exists(cached_account):
-                        log.debug(f"Cached service account file '{cached_account}' for remote '{uploader_remote}' could not be located. Removing from available accounts.")
-                        current_accounts.pop(cached_account)
+def _format_time(timestamp: float) -> str:
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))
 
-                # Add any new account files.
-                for account in accounts:
-                    if account not in current_accounts:
-                        log.debug(f"New service account '{account}' has been added for remote '{uploader_remote}'")
-                        current_accounts[account] = None
-                sa_delay[uploader_remote] = current_accounts
-                if len(current_accounts) < len(accounts):
-                    log.debug(f"Additional service accounts were added. Lifting any current bans for remote '{uploader_remote}'")
-                    uploader_delay.pop(uploader_remote, None)
+
+class Cloudplow:
+    def __init__(self, conf: config.Config):
+        self.configs: Dict[str, Any] = conf.configs
+        self.core = self.configs['core']
+        self.dry_run: bool = self.core['dry_run']
+
+        cache = Cache(conf.settings['cachefile'])
+        self.uploader_bans = cache.get_cache('uploader_bans')
+        self.syncer_bans = cache.get_cache('syncer_bans')
+        self.sa_bans = cache.get_cache('sa_bans')
+
+        self.notify = Notifications()
+        self.syncer = Syncer(self.configs)
+        self._plex_thread: Optional[threading.Thread] = None
+        self._plex_thread_lock = threading.Lock()
+
+        lock.ensure_lock_folder()
+
+    # ------------------------------------------------------------------ init
+
+    def init_notifications(self) -> None:
+        for name, settings in self.configs['notifications'].items():
+            if not self.notify.load(**settings):
+                log.error("Failed to load notification agent: %s", name)
+
+    def init_syncers(self) -> None:
+        for name, settings in self.configs['syncer'].items():
+            agent_settings = {key: value for key, value in settings.items() if key != 'sync_interval'}
+            self.syncer.load(syncer_name=name, **agent_settings)
+
+    def init_service_accounts(self) -> None:
+        """Reconcile cached service-account bans with the account files currently on disk."""
+        log.debug("Start initializing of service accounts.")
+        for remote, uploader_config in self.configs['uploader'].items():
+            if remote not in self.sa_bans:
+                self.sa_bans[remote] = None
+
+            sa_path = uploader_config.get('service_account_path')
+            if not sa_path or not os.path.exists(sa_path):
+                continue
+
+            sa_path = os.path.normpath(sa_path)
+            on_disk = [os.path.join(sa_path, name) for name in os.listdir(sa_path) if name.endswith('.json')]
+            cached = self.sa_bans[remote]
+            if cached is None:
+                log.debug("The following accounts are defined: %s and are about to be added to remote %r",
+                          on_disk, remote)
+                self.sa_bans[remote] = dict.fromkeys(on_disk)
+                continue
+
+            # drop accounts that moved or were deleted, keep bans for the rest, add new ones unbanned
+            kept = {account: expiry for account, expiry in cached.items()
+                    if account.startswith(sa_path) and os.path.exists(account)}
+            new_accounts = [account for account in on_disk if account not in kept]
+            for account in new_accounts:
+                log.debug("New service account %r has been added for remote %r", account, remote)
+            self.sa_bans[remote] = {**kept, **dict.fromkeys(new_accounts)}
+
+            if new_accounts:
+                log.debug("Additional service accounts were added. Lifting any current bans for remote %r", remote)
+                self.uploader_bans.pop(remote, None)
+        log.debug("Finished initializing of service accounts.")
+
+    # ----------------------------------------------------------- suspensions
+
+    def _is_suspended(self, bans: Any, name: str, activity: str, kind: str) -> bool:
+        """Expire finished suspensions in `bans`; return True if `name` is still suspended."""
+        suspended = False
+        for banned, expiry in dict(bans.items()).items():
+            if time.time() < expiry:
+                log_fn = log.info if banned == name else log.debug
+                log_fn("%s is still suspended due to a previously aborted %s. Normal operation in %s at %s",
+                       banned, activity, misc.seconds_to_string(expiry - time.time()), _format_time(expiry))
+                suspended = suspended or banned == name
             else:
-                log.debug(f"The following accounts are defined: '{accounts}' and are about to be added to remote '{uploader_remote}'")
-                sa_delay[uploader_remote] = accounts
-    log.debug("Finished initializing of service accounts.")
+                log.warning("%s is no longer suspended due to a previous aborted %s!", banned, activity)
+                bans.pop(banned, None)
+                self.notify.send(f"{activity.capitalize()} suspension has expired for {kind}: {banned}")
+        return suspended
 
+    def uploader_suspended(self, name: str) -> bool:
+        return self._is_suspended(self.uploader_bans, name, 'upload', 'remote')
 
-def init_syncers():
-    try:
-        for syncer_name, syncer_config in conf.configs['syncer'].items():
-            # remove irrelevant parameters before loading syncer agent
-            filtered_config = syncer_config.copy()
-            filtered_config.pop('sync_interval', None)
-            filtered_config['syncer_name'] = syncer_name
-            # load syncer agent
-            syncer.load(**filtered_config)
-    except Exception:
-        log.exception("Exception initializing syncer agents: ")
+    def syncer_suspended(self, name: str) -> bool:
+        return self._is_suspended(self.syncer_bans, name, 'sync', 'syncer')
 
+    def release_expired_service_accounts(self, remote: str) -> None:
+        accounts = self.sa_bans.get(remote)
+        if not accounts:
+            return
+        now = time.time()
+        expired = [account for account, expiry in accounts.items() if expiry is not None and now > expiry]
+        for account in expired:
+            log.debug("Setting ban status for service_account %s to None since timeout has passed", account)
+        if expired:
+            # sqlitedict only persists on assignment, so write back a modified copy
+            self.sa_bans[remote] = {**accounts, **dict.fromkeys(expired)}
 
-def check_suspended_sa(uploader_to_check):
-    global sa_delay
-    try:
-        if sa_delay[uploader_to_check] is not None:
-            log.debug(f"Proceeding to check any timeouts which have passed for remote {uploader_to_check}")
-            for account, suspension_expiry in sa_delay[uploader_to_check].items():
-                if suspension_expiry is not None:
-                    log.debug(f"Service account {suspension_expiry} was previously banned. Checking if timeout has passed")
-                    # Remove any ban times for service accounts which have passed
-                    if time.time() > suspension_expiry:
-                        log.debug(f"Setting ban status for service_account {account} to None since timeout has passed")
-                        current_data = sa_delay[uploader_to_check]
-                        current_data[account] = None
-                        sa_delay[uploader_to_check] = current_data
-    except Exception:
-        log.exception("Exception checking suspended service accounts: ")
+    def _set_sa_ban(self, remote: str, account: str, expiry: Optional[float]) -> None:
+        self.sa_bans[remote] = {**self.sa_bans[remote], account: expiry}
 
+    # ---------------------------------------------------------------- upload
 
-def check_suspended_uploaders(uploader_to_check=None):
-    global uploader_delay
+    @decorators.timed
+    def upload(self, remote: Optional[str] = None) -> None:
+        lock_file = lock.upload()
+        if lock_file.is_locked():
+            log.info("Waiting for running upload to finish before proceeding...")
 
-    suspended = False
-    try:
-        for uploader_name, suspension_expiry in dict(uploader_delay.items()).items():
-            if time.time() < suspension_expiry:
-                # this remote is still delayed due to a previous abort due to triggers
-                use_logger = (
-                    log.debug
-                    if not uploader_to_check or uploader_name != uploader_to_check
-                    else log.info
-                )
-
-                use_logger(f"{uploader_name} is still suspended due to a previously aborted upload. Normal operation in {misc.seconds_to_string(int(suspension_expiry - time.time()))} at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(suspension_expiry))}")
-                # return True when suspended if uploader_to_check is supplied and this is that remote
-                if uploader_to_check and uploader_name == uploader_to_check:
-                    suspended = True
-            else:
-                log.warning(f"{uploader_name} is no longer suspended due to a previous aborted upload!")
-                uploader_delay.pop(uploader_name, None)
-                # send notification that remote is no longer timed out
-                notify.send(message=f"Upload suspension has expired for remote: {uploader_name}")
-
-    except Exception:
-        log.exception("Exception checking suspended uploaders: ")
-    return suspended
-
-
-def check_suspended_syncers(syncer_to_check=None):
-    global syncer_delay
-
-    suspended = False
-    try:
-        for syncer_name, suspension_expiry in dict(syncer_delay.items()).items():
-            if time.time() < suspension_expiry:
-                # this syncer is still delayed due to a previous abort due to triggers
-                use_logger = (
-                    log.debug
-                    if not syncer_to_check or syncer_name != syncer_to_check
-                    else log.info
-                )
-
-                use_logger(f"{syncer_name} is still suspended due to a previously aborted sync. Normal operation in {misc.seconds_to_string(int(suspension_expiry - time.time()))} at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(suspension_expiry))}")
-                # return True when suspended if syncer_to_check is supplied and this is that remote
-                if syncer_to_check and syncer_name == syncer_to_check:
-                    suspended = True
-            else:
-                log.warning(f"{syncer_name} is no longer suspended due to a previous aborted sync!")
-                syncer_delay.pop(syncer_name, None)
-                # send notification that remote is no longer timed out
-                notify.send(message=f"Sync suspension has expired for syncer: {syncer_name}")
-
-    except Exception:
-        log.exception("Exception checking suspended syncers: ")
-    return suspended
-
-
-def run_process(task, manager_dict, **kwargs):
-    try:
-        new_process = Process(target=task, args=(manager_dict,), kwargs=kwargs)
-        return new_process.start()
-    except Exception:
-        log.exception("Exception starting process with kwargs=%r: ", kwargs)
-
-
-############################################################
-# DOER FUNCS
-############################################################
-
-
-@decorators.timed
-def do_upload(remote=None):
-    global plex_monitor_thread, uploader_delay
-    global sa_delay
-
-    nzbget = None
-    nzbget_paused = False
-
-    sabnzbd = None
-    sabnzbd_paused = False
-
-    lock_file = lock.upload()
-    if lock_file.is_locked():
-        log.info("Waiting for running upload to finish before proceeding...")
-
-    with lock_file:
-        log.info("Starting upload")
-        try:
-            # loop each supplied uploader config
-            for uploader_remote, uploader_config in conf.configs['uploader'].items():
-                # if remote is not None, skip this remote if it is not == remote
-                if remote and uploader_remote != remote:
+        with lock_file:
+            log.info("Starting upload")
+            for name, uploader_config in self.configs['uploader'].items():
+                if remote and name != remote:
                     continue
+                try:
+                    self._upload_remote(name, uploader_config)
+                except Exception:
+                    log.exception("Exception occurred while uploading to remote: %s", name)
+                    self.notify.send(f"Exception occurred while uploading to remote: {name}")
+        log.info("Finished upload")
 
-                # retrieve rclone config for this remote
-                rclone_config = conf.configs['remotes'][uploader_remote]
+    def _upload_remote(self, name: str, uploader_config: Mapping[str, Any]) -> None:
+        self.notify.send(f"Upload has begun for remote: {name}")
+        if uploader_config.get('can_be_throttled', True):
+            self._ensure_plex_monitor()
+        else:
+            log.debug("Skipping check for Plex stream due to throttling disabled in remote: %s", name)
 
-                # send notification that upload is starting
-                notify.send(message=f"Upload of {path.get_size(rclone_config['upload_folder'], uploader_config['size_excludes'])} GB has begun for remote: {uploader_remote}")
+        uploader = Uploader(name, uploader_config, self.configs['remotes'][name], self.core['rclone_binary_path'],
+                            self.core['rclone_config_path'], self.configs['plex'], self.dry_run)
 
-                # start the plex stream monitor before the upload begins, if enabled for both plex and the uploader
-                if conf.configs['plex']['enabled'] and plex_monitor_thread is None:
-                    # Only disable throttling if 'can_be_throttled' is both present in uploader_config and is set to False.
-                    if 'can_be_throttled' in uploader_config and not uploader_config['can_be_throttled']:
-                        log.debug(f"Skipping check for Plex stream due to throttling disabled in remote: {uploader_remote}")
-                    # Otherwise, assume throttling is desired.
-                    else:
-                        plex_monitor_thread = thread.start(do_plex_monitor, 'plex-monitor')
+        with self._download_clients_paused():
+            if self.sa_bans.get(name) is not None:
+                self._upload_with_service_accounts(name, uploader)
+            else:
+                self._handle_upload_result(name, uploader.upload())
 
-                # pause the nzbget queue before starting the upload, if enabled
-                if conf.configs['nzbget']['enabled']:
-                    nzbget = Nzbget(conf.configs['nzbget']['url'])
-                    if nzbget.pause_queue():
-                        nzbget_paused = True
-                        log.info("Paused the Nzbget download queue, upload commencing!")
-                        notify.send(message="Paused the Nzbget download queue, upload commencing!")
-                    else:
-                        log.error("Failed to pause the Nzbget download queue, upload commencing anyway...")
-                        notify.send(message="Failed to pause the Nzbget download queue, upload commencing anyway...")
+            if not self.dry_run:
+                uploader.remove_empty_dirs()
 
-                # pause the sabnzbd queue before starting the upload, if enabled
-                if conf.configs['sabnzbd']['enabled']:
-                    sabnzbd = Sabnzbd(conf.configs['sabnzbd']['url'], conf.configs['sabnzbd']['apikey'])
-                    if sabnzbd.pause_queue():
-                        sabnzbd_paused = True
-                        log.info("Paused the Sabnzbd download queue, upload commencing!")
-                        notify.send(message="Paused the Sabnzbd download queue, upload commencing!")
-                    else:
-                        print(sabnzbd.pause_queue())
-                        log.error("Failed to pause the Sabnzbd download queue, upload commencing anyway...")
-                        notify.send(message="Failed to pause the Sabnzbd download queue, upload commencing anyway...")
+        mover_config = uploader_config.get('mover')
+        if mover_config and mover_config.get('enabled'):
+            self._move(name, mover_config)
 
-                uploader = Uploader(uploader_remote,
-                                    uploader_config,
-                                    rclone_config,
-                                    conf.configs['core']['rclone_binary_path'],
-                                    conf.configs['core']['rclone_config_path'],
-                                    conf.configs['plex'],
-                                    conf.configs['core']['dry_run'])
+    def _upload_with_service_accounts(self, name: str, uploader: Uploader) -> None:
+        available = misc.sorted_naturally(
+            account for account, expiry in self.sa_bans[name].items() if expiry is None)
+        log.info("There is %d available service accounts", len(available))
+        log.debug("Available service accounts: %s", available)
 
-                if sa_delay[uploader_remote] is not None:
-                    available_accounts = [account for account, last_ban_time in sa_delay[uploader_remote].items() if
-                                          last_ban_time is None]
-                    available_accounts_size = len(available_accounts)
+        if not available:
+            log.info("Upload aborted due to the fact that no service accounts are currently unbanned and "
+                     "available to use for remote %s", name)
+            self.uploader_bans[name] = misc.get_lowest_remaining_time(self.sa_bans[name])
+            return
 
-                    if available_accounts_size:
-                        available_accounts = misc.sorted_list_by_digit_asc(available_accounts)
+        for index, account in enumerate(available):
+            uploader.set_service_account(account)
+            result = uploader.upload()
+            if not result.delay_hours:
+                self._notify_upload_outcome(name, result.success)
+                self._set_sa_ban(name, account, None)
+                return
 
-                    log.info(f"There is {available_accounts_size} available service accounts")
-                    log.debug(f"Available service accounts: {str(available_accounts)}")
+            self._set_sa_ban(name, account, time.time() + SECONDS_PER_HOUR * result.delay_hours)
+            log.debug("Setting service account %s as banned for remote: %s", account, name)
+            if index < len(available) - 1:
+                log.info("Upload aborted due to trigger: %s being met, %s is cycling to service_account file: %s",
+                         result.trigger, name, available[index + 1])
+                continue
 
-                    # If there are no service accounts available, do not even bother attempting the upload
-                    if not available_accounts_size:
-                        log.info(f"Upload aborted due to the fact that no service accounts are currently unbanned and available to use for remote {uploader_remote}")
-                        # add remote to uploader_delay
-                        time_till_unban = misc.get_lowest_remaining_time(sa_delay[uploader_remote])
-                        log.info(f"Lowest Remaining time till unban is {time_till_unban}")
-                        uploader_delay[uploader_remote] = time_till_unban
-                    else:
-                        for i in range(available_accounts_size):
-                            uploader.set_service_account(available_accounts[i])
-                            resp_delay, resp_trigger, resp_success = uploader.upload()
-                            if resp_delay:
-                                current_data = sa_delay[uploader_remote]
-                                current_data[available_accounts[i]] = time.time() + ((60 * 60) * resp_delay)
-                                sa_delay[uploader_remote] = current_data
-                                log.debug(f"Setting account {available_accounts[i]} as unbanned at {sa_delay[uploader_remote][available_accounts[i]]}")
-                                if i != (len(available_accounts) - 1):
-                                    log.info(f"Upload aborted due to trigger: {resp_trigger} being met, {uploader_remote} is cycling to service_account file: {available_accounts[i + 1]}")
-                                    # Set unban time for current service account
-                                    log.debug(f"Setting service account {available_accounts[i]} as banned for remote: {uploader_remote}")
-                                    continue
-                                else:
-                                    # non 0 result indicates a trigger was met, the result is how many hours
-                                    # to sleep this remote for
-                                    # Before banning remote, check that a service account did not become unbanned
-                                    # during upload
-                                    check_suspended_sa(sa_delay[uploader_remote])
+            # every account is exhausted; suspend the remote until the first one is unbanned
+            self.release_expired_service_accounts(name)
+            unban_time = misc.get_lowest_remaining_time(self.sa_bans[name])
+            if unban_time is not None:
+                log.info("Upload aborted due to trigger: %s being met, %s will continue automatic uploading "
+                         "normally in %s hours", result.trigger, name, result.delay_hours)
+                self.uploader_bans[name] = unban_time
+                self.notify.send(f"Upload was aborted for remote: {name} due to trigger {result.trigger}. "
+                                 f"Uploads suspended for {result.delay_hours} hours")
 
-                                    unban_time = misc.get_lowest_remaining_time(sa_delay[uploader_remote])
-                                    if unban_time is not None:
-                                        log.info(f"Upload aborted due to trigger: {resp_trigger} being met, {uploader_remote} will continue automatic uploading normally in {resp_delay} hours")
+    def _handle_upload_result(self, name: str, result: UploadResult) -> None:
+        if not result.delay_hours:
+            self._notify_upload_outcome(name, result.success)
+            if self.uploader_bans.pop(name, None) is not None:
+                log.info("%s is no longer suspended due to a previous aborted upload!", name)
+            return
 
-                                        # add remote to uploader_delay
-                                        log.debug(f"Adding unban time for {uploader_remote} as {misc.get_lowest_remaining_time(sa_delay[uploader_remote])}")
-                                        uploader_delay[uploader_remote] = misc.get_lowest_remaining_time(
-                                            sa_delay[uploader_remote])
+        if name in self.uploader_bans:
+            log.info("Upload aborted due to trigger: %s being met for %s uploader", result.trigger, name)
+            self.notify.send(f"Upload was aborted for remote: {name} due to trigger {result.trigger}.")
+            return
 
-                                        # send aborted upload notification
-                                        notify.send(message=f"Upload was aborted for remote: {uploader_remote} due to trigger {resp_trigger}. Uploads suspended for {resp_delay} hours")
-                            else:
-                                if resp_success:
-                                    log.info(f"Upload completed successfully for uploader: {uploader_remote}")
-                                    # send successful upload notification
-                                    notify.send(message=f"Upload was completed successfully for remote: {uploader_remote}")
-                                else:
-                                    log.info(f"Upload not completed successfully for uploader: {uploader_remote}")
-                                    # send unsuccessful upload notification
-                                    notify.send(message=f"Upload was not completed successfully for remote: {uploader_remote}")
+        log.info("Upload aborted due to trigger: %s being met, %s will continue automatic uploading normally in "
+                 "%s hours", result.trigger, name, result.delay_hours)
+        self.uploader_bans[name] = time.time() + SECONDS_PER_HOUR * result.delay_hours
+        self.notify.send(f"Upload was aborted for remote: {name} due to trigger {result.trigger}. "
+                         f"Uploads suspended for {result.delay_hours} hours")
 
-                                # Remove ban for service account
-                                sa_delay[uploader_remote][available_accounts[i]] = None
-                                break
+    def _notify_upload_outcome(self, name: str, success: bool) -> None:
+        if success:
+            log.info("Upload completed successfully for uploader: %s", name)
+            self.notify.send(f"Upload was completed successfully for remote: {name}")
+        else:
+            log.info("Upload not completed successfully for uploader: %s", name)
+            self.notify.send(f"Upload was not completed successfully for remote: {name}")
+
+    @contextlib.contextmanager
+    def _download_clients_paused(self) -> Iterator[None]:
+        """Pause enabled download clients for the duration of the block, resuming only those we paused."""
+        clients: List[Any] = []
+        if self.configs['nzbget']['enabled']:
+            clients.append(('Nzbget', Nzbget(self.configs['nzbget']['url'])))
+        if self.configs['sabnzbd']['enabled']:
+            clients.append(('Sabnzbd', Sabnzbd(self.configs['sabnzbd']['url'], self.configs['sabnzbd']['apikey'])))
+
+        paused = []
+        for label, client in clients:
+            if client.pause_queue():
+                paused.append((label, client))
+                self._log_and_notify(logging.INFO, f"Paused the {label} download queue, upload commencing!")
+            else:
+                self._log_and_notify(logging.ERROR,
+                                     f"Failed to pause the {label} download queue, upload commencing anyway...")
+        try:
+            yield
+        finally:
+            for label, client in paused:
+                if client.resume_queue():
+                    self._log_and_notify(logging.INFO, f"Resumed the {label} download queue!")
                 else:
-                    resp_delay, resp_trigger, resp_success = uploader.upload()
-                    if resp_delay:
-                        if uploader_remote not in uploader_delay:
-                            # this uploader was not already in the delay dict, so lets put it there
-                            log.info(f"Upload aborted due to trigger: {resp_trigger} being met, {uploader_remote} will continue automatic uploading normally in {resp_delay} hours")
-                            # add remote to uploader_delay
-                            uploader_delay[uploader_remote] = time.time() + 60 ** 2 * resp_delay
-                            # send aborted upload notification
-                            notify.send(message=f"Upload was aborted for remote: {uploader_remote} due to trigger {resp_trigger}. Uploads suspended for {resp_delay} hours")
-                        else:
-                            # this uploader is already in the delay dict, lets not delay it any further
-                            log.info(f"Upload aborted due to trigger: {resp_trigger} being met for {uploader_remote} uploader")
-                            # send aborted upload notification
-                            notify.send(message=f"Upload was aborted for remote: {uploader_remote} due to trigger {resp_trigger}.")
-                    else:
-                        if resp_success:
-                            log.info(f"Upload completed successfully for uploader: {uploader_remote}")
-                            # send successful upload notification
-                            notify.send(message=f"Upload was completed successfully for remote: {uploader_remote}")
-                        else:
-                            log.info(f"Upload not completed successfully for uploader: {uploader_remote}")
-                            # send unsuccessful upload notification
-                            notify.send(message=f"Upload was not completed successfully for remote: {uploader_remote}")
+                    self._log_and_notify(logging.ERROR, f"Failed to resume the {label} download queue??")
 
-                        # remove uploader from uploader_delays (as its no longer banned)
-                        if uploader_remote in uploader_delay and uploader_delay.pop(uploader_remote, None) is not None:
-                            # this uploader was in the delay dict, but upload was successful, lets remove it
-                            log.info(f"{uploader_remote} is no longer suspended due to a previous aborted upload!")
+    def _move(self, name: str, mover_config: Mapping[str, Any]) -> None:
+        missing = [setting for setting in MOVER_REQUIRED_SETTINGS if setting not in mover_config]
+        if missing:
+            log.error("Unable to act on %r mover because there was no %r setting in the mover configuration",
+                      name, missing[0])
+            return
 
-                # remove leftover empty directories from disk
-                if not conf.configs['core']['dry_run']:
-                    uploader.remove_empty_dirs()
+        route = f"{mover_config['move_from_remote']} -> {mover_config['move_to_remote']}"
+        mover = RcloneMover(mover_config, self.core['rclone_binary_path'], self.core['rclone_config_path'],
+                            self.configs['plex'], self.dry_run)
+        log.info("Move starting from %s", route)
+        self.notify.send(f"Move has started for {route}")
+        if mover.move():
+            log.info("Move completed successfully from %s", route)
+            self.notify.send(f"Move finished successfully for {route}")
+        else:
+            log.error("Move failed from %s", route)
+            self.notify.send(f"Move failed for {route}")
 
-                # resume the nzbget queue, if enabled
-                if conf.configs['nzbget']['enabled'] and nzbget is not None and nzbget_paused:
-                    if nzbget.resume_queue():
-                        nzbget_paused = False
-                        log.info("Resumed the Nzbget download queue!")
-                        notify.send(message="Resumed the Nzbget download queue!")
-                    else:
-                        log.error("Failed to resume the Nzbget download queue??")
-                        notify.send(message="Failed to resume the Nzbget download queue??")
-                # resume the Sabnzbd queue, if enabled
-                if conf.configs['sabnzbd']['enabled'] and sabnzbd is not None and sabnzbd_paused:
-                    if sabnzbd.resume_queue():
-                        sabnzbd_paused = False
-                        log.info("Resumed the Sabnzbd download queue!")
-                        notify.send(message="Resumed the Sabnzbd download queue!")
-                    else:
-                        log.error("Failed to resume the Sabnzbd download queue??")
-                        notify.send(message="Failed to resume the Sabnzbd download queue??")
+    def _log_and_notify(self, level: int, message: str) -> None:
+        log.log(level, message)
+        self.notify.send(message)
 
-                # move from staging remote to main ?
-                if 'mover' in uploader_config and 'enabled' in uploader_config['mover']:
-                    if not uploader_config['mover']['enabled']:
-                        # if not enabled, continue the uploader loop
-                        continue
+    # ------------------------------------------------------------------ sync
 
-                    # validate we have the bare minimum config settings set
-                    required_configs = ['move_from_remote', 'move_to_remote', 'rclone_extras']
-                    required_set = True
-                    for setting in required_configs:
-                        if setting not in uploader_config['mover']:
-                            log.error(f"Unable to act on '{uploader_remote}' mover because there was no '{setting}' setting in the mover configuration")
-                            required_set = False
-                            break
+    @decorators.timed
+    def sync(self, only: Optional[str] = None) -> None:
+        lock_file = lock.sync()
+        if lock_file.is_locked():
+            log.info("Waiting for running sync to finish before proceeding...")
 
-                    # do move if good
-                    if required_set:
-                        mover = RcloneMover(uploader_config['mover'],
-                                            conf.configs['core']['rclone_binary_path'],
-                                            conf.configs['core']['rclone_config_path'],
-                                            conf.configs['plex'],
-                                            conf.configs['core']['dry_run'])
-                        log.info(f"Move starting from {uploader_config['mover']['move_from_remote']} -> {uploader_config['mover']['move_to_remote']}")
-
-                        # send notification that mover has started
-                        notify.send(message=f"Move has started for {uploader_config['mover']['move_from_remote']} -> {uploader_config['mover']['move_to_remote']}")
-
-                        if mover.move():
-                            log.info(f"Move completed successfully from {uploader_config['mover']['move_from_remote']} -> {uploader_config['mover']['move_to_remote']}")
-                            # send notification move has finished
-                            notify.send(message=f"Move finished successfully for {uploader_config['mover']['move_from_remote']} -> {uploader_config['mover']['move_to_remote']}")
-
-                        else:
-                            log.error(f"Move failed from {uploader_config['mover']['move_from_remote']} -> {uploader_config['mover']['move_to_remote']} ....?")
-                            # send notification move has failed
-                            notify.send(message=f"Move failed for {uploader_config['mover']['move_from_remote']} -> {uploader_config['mover']['move_to_remote']}")
-
-        except Exception:
-            log.exception("Exception occurred while uploading: ")
-            notify.send(message="Exception occurred while uploading: ")
-
-    log.info("Finished upload")
-
-
-@decorators.timed
-def do_sync(use_syncer=None):
-    global syncer_delay
-
-    lock_file = lock.sync()
-    if lock_file.is_locked():
-        log.info("Waiting for running sync to finish before proceeding...")
-
-    with lock_file:
-        log.info("Starting sync")
-        try:
-            for sync_name, sync_config in conf.configs['syncer'].items():
-                # if syncer is not None, skip this syncer if not == syncer
-                if use_syncer and sync_name != use_syncer:
+        with lock_file:
+            log.info("Starting sync")
+            for name, sync_config in self.configs['syncer'].items():
+                if only and name != only:
                     continue
+                try:
+                    self._sync_one(name, sync_config)
+                except Exception:
+                    log.exception("Exception occurred while syncing: %s", name)
+        log.info("Finished sync")
 
-                # send notification that sync is starting
-                if sync_config['service'].lower() != 'local':
-                    notify.send(message=f"Sync initiated for syncer: {sync_name}. {'Creating' if sync_config['instance_destroy'] else 'Starting'} {sync_config['service']} instance...")
+    def _sync_one(self, name: str, sync_config: Mapping[str, Any]) -> None:
+        agent = self.syncer.get(name)
+        if agent is None:
+            return
+        service = sync_config['service']
+        is_remote = service.lower() != 'local'
+        instance_word = 'new' if agent.instance_destroy else 'existing'
 
-                # startup instance
-                resp, instance_id = syncer.startup(service=sync_config['service'], name=sync_name)
-                if not resp:
-                    # send notification of failure to startup instance
-                    notify.send(message=f'Syncer: {sync_name} failed to startup a {"new" if sync_config["instance_destroy"] else "existing"} instance. Manually check no instances are still running!')
-                    continue
+        if is_remote:
+            self.notify.send(f"Sync initiated for syncer: {name}. "
+                             f"{'Creating' if agent.instance_destroy else 'Starting'} {service} instance...")
 
-                # setup instance
-                resp = syncer.setup(service=sync_config['service'], instance_id=instance_id,
-                                    rclone_config=conf.configs['core']['rclone_config_path'])
-                if not resp:
-                    # send notification of failure to set up instance
-                    notify.send(message=f'Syncer: {sync_name} failed to setup a {"new" if sync_config["instance_destroy"] else "existing"} instance. Manually check no instances are still running!')
-                    continue
+        started, instance_id = agent.startup(name=name)
+        if not started:
+            self.notify.send(f"Syncer: {name} failed to startup a {instance_word} instance. "
+                             "Manually check no instances are still running!")
+            return
+        if not agent.setup(rclone_config=self.core['rclone_config_path']):
+            self.notify.send(f"Syncer: {name} failed to setup a {instance_word} instance. "
+                             "Manually check no instances are still running!")
+            return
 
-                # send notification of sync start
-                notify.send(message=f'Sync has begun for syncer: {sync_name}')
+        self.notify.send(f"Sync has begun for syncer: {name}")
+        ok, delay_hours, trigger = agent.sync(dry_run=self.dry_run, rclone_config=self.core['rclone_config_path'])
+        if not ok and not delay_hours:
+            log.error("Sync unexpectedly failed for syncer: %s", name)
+            self.notify.send(f"Sync failed unexpectedly for syncer: {name}. "
+                             "Manually check no instances are still running!")
+        elif not ok and trigger:
+            if name in self.syncer_bans:
+                log.info("Sync aborted due to trigger: %s being met for %s syncer", trigger, name)
+                self.notify.send(f"Sync was aborted for syncer: {name} due to trigger {trigger}.")
+            else:
+                log.info("Sync aborted due to trigger: %s being met, %s will continue automatic syncing normally "
+                         "in %s hours", trigger, name, delay_hours)
+                self.syncer_bans[name] = time.time() + SECONDS_PER_HOUR * delay_hours
+                self.notify.send(f"Sync was aborted for syncer: {name} due to trigger {trigger}. "
+                                 f"Syncs suspended for {delay_hours} hours")
+        else:
+            log.info("Syncing completed successfully for syncer: %s", name)
+            self.notify.send(f"Sync was completed successfully for syncer: {name}")
+            if self.syncer_bans.pop(name, None) is not None:
+                log.info("%s is no longer suspended due to a previous aborted sync!", name)
 
-                # do sync
-                resp, resp_delay, resp_trigger = syncer.sync(service=sync_config['service'], instance_id=instance_id,
-                                                             dry_run=conf.configs['core']['dry_run'],
-                                                             rclone_config=conf.configs['core']['rclone_config_path'])
+        destroyed = agent.destroy()
+        if is_remote:
+            if destroyed:
+                self.notify.send(f"Syncer: {name} has {'destroyed' if agent.instance_destroy else 'stopped'} "
+                                 f"its {service} instance")
+            else:
+                self.notify.send(f"Syncer: {name} failed to {'destroy' if agent.instance_destroy else 'stop'} its "
+                                 f"instance: {instance_id}. Manually check no instances are still running!")
 
-                if not resp and not resp_delay:
-                    log.error("Sync unexpectedly failed for syncer: %s", sync_name)
-                    # send unexpected sync fail notification
-                    notify.send(message=f'Sync failed unexpectedly for syncer: {sync_name}. Manually check no instances are still running!')
+    # ---------------------------------------------------------------- hidden
 
-                elif not resp and resp_trigger:
-                    # non 0 resp_delay result indicates a trigger was met, the result is how many hours to sleep
-                    if sync_name not in syncer_delay:
-                        # this syncer was not in the syncer delay dict, so lets put it there
-                        log.info(f"Sync aborted due to trigger: {resp_trigger} being met, {sync_name} will continue automatic syncing normally in {resp_delay} hours")
-                        # add syncer to syncer_delay
-                        syncer_delay[sync_name] = time.time() + 60 ** 2 * resp_delay
-                        # send aborted sync notification
-                        notify.send(message=f"Sync was aborted for syncer: {sync_name} due to trigger {resp_trigger}. Syncs suspended for {resp_delay} hours")
-                    else:
-                        # this syncer was already in the syncer delay dict, so lets not delay it any further
-                        log.info(f"Sync aborted due to trigger: {resp_trigger} being met for {sync_name} syncer")
-                        # send aborted sync notification
-                        notify.send(message=f"Sync was aborted for syncer: {sync_name} due to trigger {resp_trigger}.")
-                else:
-                    log.info(f"Syncing completed successfully for syncer: {sync_name}")
-                    # send successful sync notification
-                    notify.send(message=f"Sync was completed successfully for syncer: {sync_name}")
-                    # remove syncer from syncer_delay(as its no longer banned)
-                    if sync_name in syncer_delay and syncer_delay.pop(sync_name, None) is not None:
-                        # this syncer was in the delay dict, but sync was successful, lets remove it
-                        log.info(f"{sync_name} is no longer suspended due to a previous aborted sync!")
+    @decorators.timed
+    def clean_hidden(self) -> None:
+        lock_file = lock.hidden()
+        if lock_file.is_locked():
+            log.info("Waiting for running hidden cleaner to finish before proceeding...")
 
-                # destroy instance
-                resp = syncer.destroy(service=sync_config['service'], instance_id=instance_id)
-                if not resp and sync_config['service'].lower() != 'local':
-                    # send notification of failure to destroy/stop instance
-                    notify.send(message=f"Syncer: {sync_name} failed to {'destroy' if sync_config['instance_destroy'] else 'stop'} its instance: {instance_id}. Manually check no instances are still running!")
-                elif sync_config['service'].lower() != 'local':
-                    notify.send(
-                        message=f"Syncer: {sync_name} has {'destroyed' if sync_config['instance_destroy'] else 'stopped'} its {sync_config['service']} instance")
+        with lock_file:
+            log.info("Starting hidden cleaning")
+            for folder, hidden_config in self.configs['hidden'].items():
+                try:
+                    hidden = UnionfsHiddenFolder(folder, self.dry_run, self.core['rclone_binary_path'],
+                                                 self.core['rclone_config_path'])
+                    for remote in hidden_config['hidden_remotes']:
+                        _, deleted, failed = hidden.clean_remote(remote, self.configs['remotes'][remote])
+                        if deleted or failed:
+                            self.notify.send(f"Cleaned {deleted} hidden(s) with {failed} failure(s) "
+                                             f"from remote: {remote}")
+                    if not self.dry_run:
+                        hidden.remove_local_hidden()
+                        hidden.remove_empty_dirs()
+                except Exception:
+                    log.exception("Exception occurred while cleaning hiddens in %s: ", folder)
+        log.info("Finished hidden cleaning")
 
-        except Exception:
-            log.exception("Exception occurred while syncing: ")
+    # ------------------------------------------------------------------ plex
 
-    log.info("Finished sync")
+    def _ensure_plex_monitor(self) -> None:
+        if not self.configs['plex']['enabled']:
+            return
+        with self._plex_thread_lock:
+            if self._plex_thread is None or not self._plex_thread.is_alive():
+                self._plex_thread = threading.Thread(target=self.plex_monitor, name='plex-monitor', daemon=True)
+                self._plex_thread.start()
 
+    @decorators.timed
+    def plex_monitor(self) -> None:
+        """Throttle the running upload while enough Plex streams are playing; exits when the upload ends."""
+        plex_config = self.configs['plex']
+        plex = Plex(plex_config['url'], plex_config['token'])
+        if not plex.validate():
+            log.error("Aborting Plex Media Server stream monitor due to failure to validate supplied server URL "
+                      "and/or Token.")
+            return
 
-@decorators.timed
-def do_hidden():
-    lock_file = lock.hidden()
-    if lock_file.is_locked():
-        log.info("Waiting for running hidden cleaner to finish before proceeding...")
+        log.info("Plex Media Server URL + Token were validated. Sleeping for %d seconds before checking Rclone "
+                 "RC URL.", RCLONE_STARTUP_GRACE_SECONDS)
+        time.sleep(RCLONE_STARTUP_GRACE_SECONDS)
 
-    with lock_file:
-        log.info("Starting hidden cleaning")
-        try:
-            # loop each supplied hidden folder
-            for hidden_folder, hidden_config in conf.configs['hidden'].items():
-                hidden = UnionfsHiddenFolder(hidden_folder, conf.configs['core']['dry_run'],
-                                             conf.configs['core']['rclone_binary_path'],
-                                             conf.configs['core']['rclone_config_path'])
-
-                # loop the chosen remotes for this hidden config cleaning files
-                for hidden_remote_name in hidden_config['hidden_remotes']:
-                    # retrieve rclone config for this remote
-                    hidden_remote_config = conf.configs['remotes'][hidden_remote_name]
-
-                    # clean remote
-                    clean_resp, deleted_ok, deleted_fail = hidden.clean_remote(hidden_remote_name, hidden_remote_config)
-
-                    # send notification
-                    if deleted_ok or deleted_fail:
-                        notify.send(message=f"Cleaned {deleted_ok} hidden(s) with {deleted_fail} failure(s) from remote: {hidden_remote_name}")
-
-                # remove the HIDDEN~ files from disk and empty directories from unionfs-fuse folder
-                if not conf.configs['core']['dry_run']:
-                    hidden.remove_local_hidden()
-                    hidden.remove_empty_dirs()
-
-        except Exception:
-            log.exception("Exception occurred while cleaning hiddens: ")
-
-    log.info("Finished hidden cleaning")
-
-
-@decorators.timed
-def do_plex_monitor():
-    global plex_monitor_thread
-
-    # create the plex object
-    plex = Plex(conf.configs['plex']['url'], conf.configs['plex']['token'])
-    if not plex.validate():
-        log.error("Aborting Plex Media Server stream monitor due to failure to validate supplied server URL and/or Token.")
-        plex_monitor_thread = None
-        return
-
-    # sleep 15 seconds to allow rclone to start
-    log.info("Plex Media Server URL + Token were validated. Sleeping for 15 seconds before checking Rclone RC URL.")
-    time.sleep(15)
-
-    # create the rclone throttle object
-    rclone = RcloneThrottler(conf.configs['plex']['rclone']['url'])
-    if not rclone.validate():
-        log.error("Aborting Plex Media Server stream monitor due to failure to validate supplied Rclone RC URL.")
-        plex_monitor_thread = None
-        return
-    else:
+        rclone = RcloneThrottler(plex_config['rclone']['url'])
+        if not rclone.validate():
+            log.error("Aborting Plex Media Server stream monitor due to failure to validate supplied Rclone RC URL.")
+            return
         log.info("Rclone RC URL was validated. Stream monitoring for Plex Media Server will now begin.")
 
-    throttled = False
-    throttle_speed = None
-    lock_file = lock.upload()
-    while lock_file.is_locked():
-        streams = plex.get_streams()
-        if streams is None:
-            log.error(f"Failed to check Plex Media Server stream(s). Trying again in {conf.configs['plex']['poll_interval']} seconds...")
-        else:
-            # we had a response
-            stream_count = sum(
-                stream.state in ['playing', 'buffering'] and not stream.local
-                for stream in streams
-            )
-            local_stream_count = sum(
-                stream.state in ['playing', 'buffering'] and stream.local
-                for stream in streams
-            )
+        max_streams = plex_config['max_streams_before_throttle']
+        speeds = plex_config['rclone']['throttle_speeds']
+        throttled = False
+        throttle_speed: Optional[str] = None
+        upload_lock = lock.upload()
 
-            # if we are accounting for local streams, add them to the stream count
-            if not conf.configs['plex']['ignore_local_streams']:
-                stream_count += local_stream_count
+        while upload_lock.is_locked():
+            streams = plex.get_streams()
+            if streams is None:
+                log.error("Failed to check Plex Media Server stream(s). Trying again in %s seconds...",
+                          plex_config['poll_interval'])
+                time.sleep(plex_config['poll_interval'])
+                continue
 
-            # are we already throttled?
-            if ((not throttled or (throttled and not rclone.throttle_active(throttle_speed))) and (
-                    stream_count >= conf.configs['plex']['max_streams_before_throttle'])):
-                log.info(f"There was {stream_count} playing stream(s) on Plex Media Server while it was currently un-throttled.")
+            stream_count = sum(1 for stream in streams if stream.active and
+                               (not stream.local or not plex_config['ignore_local_streams']))
+            wanted_speed = misc.get_nearest_less_element(speeds, stream_count)
+
+            if stream_count >= max_streams and (not throttled or not rclone.throttle_active(throttle_speed)):
+                log.info("There was %d playing stream(s) on Plex Media Server while it was currently un-throttled.",
+                         stream_count)
                 for stream in streams:
                     log.info(stream)
                 log.info("Upload throttling will now commence.")
-
-                # send throttle request
-                throttle_speed = misc.get_nearest_less_element(conf.configs['plex']['rclone']['throttle_speeds'],
-                                                               stream_count)
+                throttle_speed = wanted_speed
                 throttled = rclone.throttle(throttle_speed)
+                if throttled and plex_config['notifications']:
+                    self.notify.send(f"Throttled current upload to {throttle_speed} because there was "
+                                     f"{stream_count} playing stream(s) on Plex")
 
-                # send notification
-                if throttled and conf.configs['plex']['notifications']:
-                    notify.send(message=f"Throttled current upload to {throttle_speed} because there was {stream_count} playing stream(s) on Plex")
+            elif throttled and stream_count < max_streams:
+                log.info("There was less than %d playing stream(s) on Plex Media Server while it was currently "
+                         "throttled. Removing throttle ...", max_streams)
+                throttled = not rclone.no_throttle()
+                throttle_speed = None
+                if not throttled and plex_config['notifications']:
+                    self.notify.send(f"Un-throttled current upload because there was less than {max_streams} "
+                                     "playing stream(s) on Plex Media Server")
+
+            elif throttled and wanted_speed != throttle_speed:
+                throttle_speed = wanted_speed
+                log.info("Adjusting throttle speed for current upload to %s because there was now %d playing "
+                         "stream(s) on Plex Media Server", throttle_speed, stream_count)
+                throttled = rclone.throttle(throttle_speed)
+                if throttled and plex_config['notifications']:
+                    self.notify.send(f"Throttle for current upload was adjusted to {throttle_speed} due to "
+                                     f"{stream_count} playing stream(s) on Plex Media Server")
 
             elif throttled:
-                if stream_count < conf.configs['plex']['max_streams_before_throttle']:
-                    log.info(f"There was less than {conf.configs['plex']['max_streams_before_throttle']} playing stream(s) on Plex Media Server while it was currently throttled. Removing throttle ...")
-                    # send un-throttle request
-                    throttled = not rclone.no_throttle()
-                    throttle_speed = None
+                log.info("There was %d playing stream(s) on Plex Media Server it was already throttled to %s. "
+                         "Throttling will continue.", stream_count, throttle_speed)
 
-                    # send notification
-                    if not throttled and conf.configs['plex']['notifications']:
-                        notify.send(message=f"Un-throttled current upload because there was less than {conf.configs['plex']['max_streams_before_throttle']} playing stream(s) on Plex Media Server")
+            time.sleep(plex_config['poll_interval'])
 
-                elif misc.get_nearest_less_element(conf.configs['plex']['rclone']['throttle_speeds'],
-                                                   stream_count) != throttle_speed:
-                    # throttle speed changed, probably due to more/fewer streams, re-throttle
-                    throttle_speed = misc.get_nearest_less_element(conf.configs['plex']['rclone']['throttle_speeds'],
-                                                                   stream_count)
-                    log.info(f"Adjusting throttle speed for current upload to {throttle_speed} because there was now {stream_count} playing stream(s) on Plex Media Server")
+        log.info("Finished monitoring Plex stream(s)!")
 
-                    throttled = rclone.throttle(throttle_speed)
+    # ------------------------------------------------------------- scheduled
 
-                    # send notification
-                    if throttled and conf.configs['plex']['notifications']:
-                        notify.send(message=f'Throttle for current upload was adjusted to {throttle_speed} due to {stream_count} playing stream(s) on Plex Media Server')
+    def scheduled_uploader(self, name: str, uploader_config: Mapping[str, Any]) -> None:
+        log.debug("Scheduled upload triggered for uploader: %s", name)
+        try:
+            if self.uploader_suspended(name):
+                return
+            self.release_expired_service_accounts(name)
 
-                else:
-                    log.info(f"There was {stream_count} playing stream(s) on Plex Media Server it was already throttled to {throttle_speed}. Throttling will continue.")
-
-        # the lock_file exists, so we can assume an upload is in progress at this point
-        time.sleep(conf.configs['plex']['poll_interval'])
-
-    log.info("Finished monitoring Plex stream(s)!")
-    plex_monitor_thread = None
-
-
-############################################################
-# SCHEDULED FUNCS
-############################################################
-
-def scheduled_uploader(uploader_name, uploader_settings):
-    log.debug(f"Scheduled disk check triggered for uploader: {uploader_name}")
-    try:
-        rclone_settings = conf.configs['remotes'][uploader_name]
-
-        # check suspended uploaders
-        if check_suspended_uploaders(uploader_name):
-            return
-
-        # clear any banned service accounts
-        check_suspended_sa(uploader_name)
-
-        # check used disk space
-        used_space = path.get_size(rclone_settings['upload_folder'], uploader_settings['size_excludes'])
-
-        # if disk space is above the limit, clean hidden files then upload
-        if used_space >= uploader_settings['max_size_gb']:
-            log.info(f"Uploader: {uploader_name}. Local folder size is currently {used_space - uploader_settings['max_size_gb']} GB over the maximum limit of {uploader_settings['max_size_gb']} GB")
-
-            # does this uploader have schedule settings
-            if 'schedule' in uploader_settings and uploader_settings['schedule']['enabled']:
-                # there is a schedule set for this uploader, check if we are within the allowed times
-                current_time = time.strftime('%H:%M')
-                if not misc.is_time_between((uploader_settings['schedule']['allowed_from'],
-                                             uploader_settings['schedule']['allowed_until'])):
-                    log.info(f"Uploader: {uploader_name}. The current time {current_time} is not within the allowed upload time periods {uploader_settings['schedule']['allowed_from']} -> {uploader_settings['schedule']['allowed_until']}")
+            upload_window = uploader_config.get('schedule', {})
+            if upload_window.get('enabled'):
+                allowed = (upload_window['allowed_from'], upload_window['allowed_until'])
+                if not misc.is_time_between(allowed):
+                    log.info("Uploader: %s. The current time %s is not within the allowed upload time periods "
+                             "%s -> %s", name, time.strftime('%H:%M'), *allowed)
                     return
 
-            # clean hidden files
-            do_hidden()
-            # upload
-            do_upload(uploader_name)
+            self.clean_hidden()
+            self.upload(name)
+        except Exception:
+            log.exception("Unexpected exception occurred while processing uploader %s: ", name)
 
-        else:
-            log.info(f"Uploader: {uploader_name}. Local folder size is currently {used_space} GB. Still have {uploader_settings['max_size_gb'] - used_space} GB remaining before its eligible to begin uploading...")
+    def scheduled_syncer(self, syncer_name: str) -> None:
+        log.info("Scheduled sync triggered for syncer: %s", syncer_name)
+        try:
+            if not self.syncer_suspended(syncer_name):
+                self.sync(syncer_name)
+        except Exception:
+            log.exception("Unexpected exception occurred while processing syncer: %s", syncer_name)
 
-    except Exception:
-        log.exception(f"Unexpected exception occurred while processing uploader {uploader_name}: ")
+    def run_in_process(self, syncer_name: str) -> None:
+        Process(target=self.scheduled_syncer, kwargs={'syncer_name': syncer_name}).start()
+
+    def run_forever(self) -> None:
+        for name, uploader_config in self.configs['uploader'].items():
+            schedule.every(uploader_config['check_interval']).minutes.do(self.scheduled_uploader, name,
+                                                                        uploader_config)
+            log.info("Added %s uploader to schedule, uploading every %d minutes", name,
+                     uploader_config['check_interval'])
+
+        for name, sync_config in self.configs['syncer'].items():
+            # remote syncers can run for hours, keep them off the scheduler thread
+            job = self.scheduled_syncer if sync_config['service'].lower() == 'local' else self.run_in_process
+            schedule.every(sync_config['sync_interval']).hours.do(job, syncer_name=name)
+            log.info("Added %s syncer to schedule, syncing every %d hours", name, sync_config['sync_interval'])
+
+        while True:
+            try:
+                schedule.run_pending()
+            except Exception:
+                log.exception("Unhandled exception occurred while processing scheduled tasks: ")
+            time.sleep(1)
 
 
-def scheduled_syncer(syncer_name):
-    log.info(f"Scheduled sync triggered for syncer: {syncer_name}")
-    try:
-        # check suspended syncers
-        if check_suspended_syncers(syncer_name):
-            return
-
-        # do sync
-        do_sync(syncer_name)
-
-    except Exception:
-        log.exception(f"Unexpected exception occurred while processing syncer: {syncer_name}")
-
-
-############################################################
-# MAIN
-############################################################
-
-
-if __name__ == "__main__":
-    # show the latest version info from git
+def main() -> int:
+    conf = config.Config()
+    setup_logging(conf.settings['logfile'], conf.settings['loglevel'])
+    conf.load()
     version.check_version()
 
-    # run chosen mode
+    command = conf.args['cmd']
+    if command == 'update_config':
+        return 0
+
+    app = Cloudplow(conf)
+    app.init_notifications()
     try:
-
-        if conf.args['cmd'] == 'clean':
+        if command == 'clean':
             log.info("Started in clean mode")
-            # init notifications
-            init_notifications()
-            do_hidden()
-        elif conf.args['cmd'] == 'upload':
+            app.clean_hidden()
+        elif command == 'upload':
             log.info("Started in upload mode")
-            # init notifications
-            init_notifications()
-            # initialize service accounts if provided in config
-            init_service_accounts()
-            do_hidden()
-            do_upload()
-        elif conf.args['cmd'] == 'sync':
+            app.init_service_accounts()
+            app.clean_hidden()
+            app.upload()
+        elif command == 'sync':
             log.info("Starting in sync mode")
-            log.warning("Sync currently has a bug while displaying output to the console. Tail the logfile to view readable logs!")
-            # init notifications
-            init_notifications()
-            init_syncers()
-            do_sync()
-        elif conf.args['cmd'] == 'run':
+            app.init_syncers()
+            app.sync()
+        elif command == 'run':
             log.info("Started in run mode")
-
-            # init notifications
-            init_notifications()
-            # initialize service accounts if provided in confing
-            init_service_accounts()
-
-            # add uploaders to schedule
-            for uploader, uploader_conf in conf.configs['uploader'].items():
-                schedule.every(uploader_conf['check_interval']).minutes.do(scheduled_uploader, uploader, uploader_conf)
-                log.info(f"Added {uploader} uploader to schedule, checking available disk space every {uploader_conf['check_interval']} minutes")
-
-            # add syncers to schedule
-            init_syncers()
-            for syncer_name, syncer_conf in conf.configs['syncer'].items():
-                if syncer_conf['service'].lower() == 'local':
-                    schedule.every(syncer_conf['sync_interval']).hours.do(scheduled_syncer, syncer_name=syncer_name)
-                else:
-                    schedule.every(syncer_conf['sync_interval']).hours.do(run_process, scheduled_syncer,
-                                                                          syncer_name=syncer_name)
-                log.info(f"Added {syncer_name} syncer to schedule, syncing every {syncer_conf['sync_interval']} hours")
-
-            # run schedule
-            while True:
-                try:
-                    schedule.run_pending()
-                except Exception:
-                    log.exception("Unhandled exception occurred while processing scheduled tasks: ")
-                time.sleep(1)
-        elif conf.args['cmd'] == 'update_config':
-            exit(0)
-        else:
-            log.error("Unknown command: %r", conf.args['cmd'])
-
+            app.init_service_accounts()
+            app.init_syncers()
+            app.run_forever()
     except KeyboardInterrupt:
         log.info("cloudplow was interrupted by Ctrl + C")
     except Exception:
         log.exception("Unexpected fatal exception occurred: ")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

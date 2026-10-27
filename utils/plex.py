@@ -1,144 +1,110 @@
+from __future__ import annotations
+
 import logging
 import platform
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import urljoin
 from uuid import getnode
 
 import requests
-import urllib3
+
 log = logging.getLogger('plex')
-urllib3.disable_warnings()
+
+ACTIVE_STATES = ('playing', 'buffering')
 
 
 class Plex:
-    def __init__(self, url, token):
+    def __init__(self, url: str, token: str):
         self.url = url
-        self.token = token
-        self.headers = {'X-Plex-Token': self.token,
-                        'Accept': 'application/json',
-                        'X-Plex-Provides': 'controller',
-                        'X-Plex-Platform': platform.uname()[0],
-                        'X-Plex-Platform-Version': platform.uname()[2],
-                        'X-Plex-Product': 'cloudplow',
-                        'X-Plex-Version': '0.9.5',
-                        'X-Plex-Device': platform.platform(),
-                        'X-Plex-Client-Identifier': hex(getnode())}
+        self.session = requests.Session()
+        self.session.headers.update({
+            'X-Plex-Token': token,
+            'Accept': 'application/json',
+            'X-Plex-Provides': 'controller',
+            'X-Plex-Platform': platform.system(),
+            'X-Plex-Platform-Version': platform.release(),
+            'X-Plex-Product': 'cloudplow',
+            'X-Plex-Version': '0.9.5',
+            'X-Plex-Device': platform.platform(),
+            'X-Plex-Client-Identifier': hex(getnode()),
+        })
 
-    def validate(self):
-        try:
-            request_url = urljoin(self.url, 'status/sessions')
-            r = requests.get(request_url, headers=self.headers, timeout=15, verify=False)
-            if r.status_code == 200 and r.headers['Content-Type'] == 'application/json':
-                log.debug(f"Server responded with status_code={r.status_code}, content: {r.json()}")
-                return True
-            else:
-                log.error(f"Server responded with status_code={r.status_code}, content: {r.content}")
-                return False
-        except Exception:
-            log.exception(f"Exception validating server token={self.token}, url={self.url}: ")
-            return False
+    def validate(self) -> bool:
+        return self._sessions() is not None
 
-    def get_streams(self):
+    def get_streams(self) -> Optional[List[PlexStream]]:
+        """Return current streams, an empty list if idle, or None if the server could not be queried."""
+        result = self._sessions()
+        if result is None:
+            return None
+        container = result.get('MediaContainer')
+        if container is None:
+            log.error("Failed to retrieve streams from server at %s", self.url)
+            return None
+        sessions = container.get('Video') or container.get('Metadata') or []
+        if not sessions:
+            log.debug("There were no streams to check for server at %s", self.url)
+        return [PlexStream(stream) for stream in sessions]
+
+    def _sessions(self) -> Optional[Dict[str, Any]]:
         request_url = urljoin(self.url, 'status/sessions')
         try:
-            r = requests.get(request_url, headers=self.headers, timeout=15, verify=False)
-            if r.status_code == 200 and r.headers['Content-Type'] == 'application/json':
-                result = r.json()
-                log.debug(f"Server responded with status_code={r.status_code}, content: {r.content}")
-
-                if 'MediaContainer' not in result:
-                    log.error(f"Failed to retrieve streams from server at {self.url}")
-                    return None
-                elif 'Video' not in result['MediaContainer'] and 'Metadata' not in result['MediaContainer']:
-                    log.debug(f"There were no streams to check for server at {self.url}")
-                    return []
-
-                return [
-                    PlexStream(stream)
-                    for stream in result['MediaContainer'][
-                        'Video'
-                        if 'Video' in result['MediaContainer']
-                        else 'Metadata'
-                    ]
-                ]
-
-            else:
-                log.error(f"Server url or token was invalid, token={self.token}, request_url={request_url}, status_code={r.status_code}, content: {r.content}")
-                return None
-        except Exception:
-            log.exception(f"Exception retrieving streams from request_url={request_url}, token={self.token}: ")
+            resp = self.session.get(request_url, timeout=15)
+        except requests.RequestException:
+            # the token lives in the session headers, so it is never part of this message
+            log.exception("Exception retrieving sessions from %s: ", request_url)
             return None
+        if resp.status_code != 200 or not resp.headers.get('Content-Type', '').startswith('application/json'):
+            log.error("Server url or token was invalid, request_url=%s, status_code=%s", request_url,
+                      resp.status_code)
+            return None
+        log.debug("Server responded with status_code=%s, content: %s", resp.status_code, resp.text)
+        return resp.json()
 
 
-# helper classes (parsing responses etc...)
 class PlexStream:
-    def __init__(self, stream):
-        self.user = stream['User']['title'] if 'User' in stream else 'Unknown'
-        if 'Player' in stream:
-            self.player = stream['Player']['product']
-            self.state = stream['Player']['state']
-            self.local = stream['Player']['local']
-        else:
-            self.player = 'Unknown'
-            self.ip = 'Unknown'
-            self.state = 'Unknown'
-            self.local = None
-
-        self.session_id = stream['Session']['id'] if 'Session' in stream else 'Unknown'
-        if 'Media' in stream:
-            self.type = self.get_decision(stream['Media'])
-        else:
-            self.type = 'Unknown'
+    def __init__(self, stream: Mapping[str, Any]):
+        player = stream.get('Player', {})
+        self.user = stream.get('User', {}).get('title', 'Unknown')
+        self.player = player.get('product', 'Unknown')
+        self.state = player.get('state', 'Unknown')
+        self.local = player.get('local')
+        self.session_id = stream.get('Session', {}).get('id', 'Unknown')
+        self.type = self.get_decision(stream.get('Media', []))
 
         if self.type == 'transcode':
-            if 'TranscodeSession' in stream:
-                self.video_decision = stream['TranscodeSession']['videoDecision']
-                self.audio_decision = stream['TranscodeSession']['audioDecision']
-            else:
-                self.video_decision = 'Unknown'
-                self.audio_decision = 'Unknown'
+            transcode = stream.get('TranscodeSession', {})
+            self.video_decision = transcode.get('videoDecision', 'Unknown')
+            self.audio_decision = transcode.get('audioDecision', 'Unknown')
         else:
-            self.video_decision = 'directplay'
-            self.audio_decision = 'directplay'
+            self.video_decision = self.audio_decision = 'directplay'
 
         if 'title' not in stream or 'type' not in stream:
             self.title = 'Unknown'
         elif stream['type'] == 'episode':
             self.title = f"{stream['grandparentTitle']} {stream['parentIndex']}x{stream['index']}"
-
         else:
             self.title = stream['title']
 
+    @property
+    def active(self) -> bool:
+        return self.state in ACTIVE_STATES
+
     @staticmethod
-    def get_decision(medias):
+    def get_decision(medias: List[Mapping[str, Any]]) -> str:
         for media in medias:
-            if 'Part' not in media:
-                continue
-            for part in media['Part']:
+            for part in media.get('Part', []):
                 if 'decision' in part:
                     return part['decision']
         return 'Unknown'
 
-    def __str__(self):
+    def __str__(self) -> str:
+        stream_type = self.type
         if self.type == 'transcode':
-            transcode_type = "("
-            if self.video_decision == 'transcode':
-                transcode_type += "video"
-            if self.audio_decision == 'transcode':
-                if 'video' in transcode_type:
-                    transcode_type += " & "
-                transcode_type += "audio"
-            transcode_type += ")"
-            stream_type = f"transcode {transcode_type}"
-        else:
-            stream_type = self.type
+            transcoded = [kind for kind, decision in (('video', self.video_decision), ('audio', self.audio_decision))
+                          if decision == 'transcode']
+            stream_type = f"transcode ({' & '.join(transcoded)})"
+        return (f"{self.user} is playing {self.title} using {self.player}. "
+                f"Stream state: {self.state}, local: {self.local}, type: {stream_type}.")
 
-        return u"{user} is playing {media} using {player}. " \
-               "Stream state: {state}, local: {local}, type: {type}.".format(user=self.user,
-                                                                             media=self.title,
-                                                                             player=self.player,
-                                                                             state=self.state,
-                                                                             local=self.local,
-                                                                             type=stream_type)
-
-    def __repr__(self):
-        return str(self)
+    __repr__ = __str__

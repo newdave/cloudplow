@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import logging
-import uuid
+from typing import Any, Dict, Mapping, Optional
 
 from .local import Local
 from .scaleway import Scaleway
@@ -13,133 +15,35 @@ SERVICES = {
 
 
 class Syncer:
-    def __init__(self, config):
+    """Registry of configured sync agents, keyed by syncer name."""
+
+    def __init__(self, config: Mapping[str, Any]):
         self.config = config
-        self.services = []
+        self.agents: Dict[str, Any] = {}
 
-    def load(self, **kwargs):
-        # validate required keywords were supplied
-        if 'service' not in kwargs:
-            log.error("You must specify a service to load with the service parameter")
+    def load(self, syncer_name: str, service: Optional[str] = None, tool_path: Optional[str] = None,
+             sync_from: Optional[str] = None, sync_to: Optional[str] = None, **kwargs: Any) -> bool:
+        if service not in SERVICES:
+            log.error("You specified an invalid sync service to load for %s: %s", syncer_name, service)
             return False
-        elif kwargs['service'] not in SERVICES:
-            log.error("You specified an invalid service to load: %s", kwargs['service'])
+        if not tool_path:
+            log.error("You must specify a tool_path for syncer %s", syncer_name)
             return False
-
-        if 'tool_path' not in kwargs:
-            log.error("You must specify a tool_path for each syncer in your service")
-            return False
-
-        if 'sync_from' not in kwargs or 'sync_to' not in kwargs:
-            log.error("You must specify a sync_form and sync_to in your configuration")
+        if not sync_from or not sync_to:
+            log.error("You must specify a sync_from and sync_to for syncer %s", syncer_name)
             return False
 
         try:
-            # retrieve remotes config for sync_from and sync_to
-            sync_from_config = self.config['remotes'][kwargs['sync_from']]
-            sync_to_config = self.config['remotes'][kwargs['sync_to']]
+            remotes = self.config['remotes']
+            self.agents[syncer_name] = SERVICES[service](tool_path, remotes[sync_from], remotes[sync_to],
+                                                         syncer_name=syncer_name, **kwargs)
+            return True
+        except KeyError as missing:
+            log.error("Syncer %s refers to remote %s which is not in the remotes config", syncer_name, missing)
+        return False
 
-            # clean kwargs before initializing the service
-            tool_path = kwargs['tool_path']
-            chosen_service = SERVICES[kwargs['service']]
-            del kwargs['service']
-            del kwargs['sync_from']
-            del kwargs['sync_to']
-            del kwargs['tool_path']
-
-            # load service
-            service = chosen_service(tool_path, sync_from_config, sync_to_config, **kwargs)
-            self.services.append(service)
-
-        except Exception:
-            log.exception("Exception while loading service, kwargs=%r: ", kwargs)
-
-    """
-        Methods below require minimum 1 or 2 keyword parameter (service and name).
-    """
-
-    def startup(self, **kwargs):
-        if 'service' not in kwargs:
-            log.error("You must specify a service to startup")
-            return False
-        if 'name' not in kwargs:
-            kwargs['name'] = str(uuid.uuid4())
-
-        try:
-            # clean kwargs before passing this on
-            chosen_service = kwargs['service']
-            del kwargs['service']
-
-            for syncer in self.services:
-                if chosen_service and syncer.NAME.lower() != chosen_service:
-                    continue
-                if syncer.syncer_name != kwargs['name']:
-                    continue
-
-                return syncer.startup(**kwargs)
-        except Exception:
-            log.exception("Exception starting instance kwargs=%r: ", kwargs)
-
-    """
-        Methods below require minimum 1 or 2 keyword parameter (service and instance_id).
-    """
-
-    def setup(self, **kwargs):
-        if 'service' not in kwargs:
-            log.error("You must specify a service to setup")
-            return False
-
-        try:
-            # clean kwargs before passing this on
-            chosen_service = kwargs['service']
-            del kwargs['service']
-
-            for syncer in self.services:
-                if chosen_service and syncer.NAME.lower() != chosen_service:
-                    continue
-                # ignore syncer if instance_id does not match otherwise setup all syncers from service
-                if 'instance_id' in kwargs and syncer.instance_id != kwargs['instance_id']:
-                    continue
-                return syncer.setup(**kwargs)
-        except Exception:
-            log.exception("Exception setting up instance kwargs=%r: ", kwargs)
-
-    def destroy(self, **kwargs):
-        if 'service' not in kwargs:
-            log.error("You must specify a service to destroy")
-            return False
-
-        try:
-            # clean kwargs before passing this on
-            chosen_service = kwargs['service']
-            del kwargs['service']
-
-            for syncer in self.services:
-                if chosen_service and syncer.NAME.lower() != chosen_service:
-                    continue
-                # ignore syncer if instance_id does not match otherwise destroy all syncers from service
-                if 'instance_id' in kwargs and syncer.instance_id != kwargs['instance_id']:
-                    continue
-                return syncer.destroy(**kwargs)
-        except Exception:
-            log.exception("Exception destroying instance kwargs=%r: ", kwargs)
-
-    def sync(self, **kwargs):
-        if 'service' not in kwargs:
-            log.error("You must specify a service to sync")
-            return False
-
-        try:
-            # clean kwargs before passing this on
-            chosen_service = kwargs['service']
-            del kwargs['service']
-
-            for syncer in self.services:
-                if chosen_service and syncer.NAME.lower() != chosen_service:
-                    continue
-                # ignore syncer if instance_id does not match otherwise destroy all syncers from service
-                if 'instance_id' in kwargs and syncer.instance_id != kwargs['instance_id']:
-                    continue
-                return syncer.sync(**kwargs)
-        except Exception:
-            log.exception("Exception syncing instance kwargs=%r: ", kwargs)
+    def get(self, syncer_name: str) -> Optional[Any]:
+        agent = self.agents.get(syncer_name)
+        if agent is None:
+            log.error("No sync agent was loaded for syncer: %s", syncer_name)
+        return agent

@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import logging
+from typing import Any, List, Optional
 
 from .apprise import Apprise
 from .pushover import Pushover
@@ -15,42 +18,25 @@ SERVICES = {
 
 class Notifications:
     def __init__(self):
-        self.services = []
+        self.services: List[Any] = []
 
-    def load(self, **kwargs):
-        if 'service' not in kwargs:
-            log.error("You must specify a service to load with the service parameter")
+    def load(self, service: Optional[str] = None, **kwargs: Any) -> bool:
+        if service not in SERVICES:
+            log.error("You specified an invalid notification service to load: %s", service)
             return False
-        elif kwargs['service'] not in SERVICES:
-            log.error("You specified an invalid service to load: %s", kwargs['service'])
-            return False
-
         try:
-            chosen_service = SERVICES[kwargs['service']]
-            del kwargs['service']
+            self.services.append(SERVICES[service](**kwargs))
+            return True
+        except TypeError:
+            log.exception("Invalid settings for notification service %s: ", service)
+        return False
 
-            # load service
-            service = chosen_service(**kwargs)
-            self.services.append(service)
-
-        except Exception:
-            log.exception("Exception while loading service, kwargs=%r: ", kwargs)
-
-    def send(self, **kwargs):
-        try:
-            # remove service keyword if supplied
-            if 'service' in kwargs:
-                # send notification to specified service
-                chosen_service = kwargs['service'].lower()
-                del kwargs['service']
-            else:
-                chosen_service = None
-
-            # send notification(s)
-            for service in self.services:
-                if chosen_service and service.NAME.lower() != chosen_service:
-                    continue
-                elif service.send(**kwargs):
-                    log.info("Sent notification with %s", service.NAME)
-        except Exception:
-            log.exception("Exception sending notification, kwargs=%r: ", kwargs)
+    def send(self, message: str, service: Optional[str] = None) -> None:
+        for agent in self.services:
+            if service and agent.NAME.lower() != service.lower():
+                continue
+            try:
+                if agent.send(message=message):
+                    log.info("Sent notification with %s", agent.NAME)
+            except Exception:
+                log.exception("Exception sending notification with %s: ", agent.NAME)

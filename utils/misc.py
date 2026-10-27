@@ -1,72 +1,49 @@
-import contextlib
-import logging
+from __future__ import annotations
+
 import re
 import time
+from typing import Iterable, List, Mapping, Optional, Tuple, TypeVar
 
-log = logging.getLogger("misc")
-
-
-def get_lowest_remaining_time(data):
-    sorted_data = sorted(data.items(), key=lambda x: x[1])
-    return sorted_data[0][1]
+T = TypeVar('T')
 
 
-def seconds_to_string(seconds):
-    """ reference: https://codereview.stackexchange.com/a/120595 """
-    resp = ''
-    try:
-        minutes, seconds = divmod(seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        days, hours = divmod(hours, 24)
-        if days:
-            resp += f'{days} days'
-        if hours:
-            if len(resp):
-                resp += ', '
-            resp += f'{hours} hours'
-        if minutes:
-            if len(resp):
-                resp += ', '
-            resp += f'{minutes} minutes'
-        if seconds:
-            if len(resp):
-                resp += ' and '
-            resp += f'{seconds} seconds'
-    except Exception:
-        log.exception(f"Exception occurred converting {seconds} seconds to readable string: ")
-        resp = f'{seconds} seconds'
-    return resp
+def get_lowest_remaining_time(data: Mapping[str, Optional[float]]) -> Optional[float]:
+    """Return the earliest expiry among `data` values, or None if any entry is not banned."""
+    values = list(data.values())
+    if not values or any(value is None for value in values):
+        return None
+    return min(values)
 
 
-def merge_dicts(*dicts):
-    """ reference: https://stackoverflow.com/a/24745412 """
-    d = {}
-    for dict in dicts:
-        for key in dict:
-            with contextlib.suppress(KeyError):
-                d[key] = dict[key]
-    return d
+def seconds_to_string(seconds: float) -> str:
+    minutes, seconds = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts = [f'{value} {unit}' for value, unit in
+             ((days, 'days'), (hours, 'hours'), (minutes, 'minutes')) if value]
+    if seconds or not parts:
+        suffix = f'{seconds} seconds'
+        return f"{', '.join(parts)} and {suffix}" if parts else suffix
+    return ', '.join(parts)
 
 
-def get_nearest_less_element(data, num):
-    """ reference: https://stackoverflow.com/a/7934624 """
-    return data[str(num)] if str(num) in data else data[min(data.keys(), key=lambda k: abs(int(k) - num))]
+def get_nearest_less_element(data: Mapping[str, T], num: int) -> T:
+    """Return the value whose integer key is the largest one <= num (or the smallest key if none are)."""
+    keys = sorted(int(key) for key in data)
+    eligible = [key for key in keys if key <= num]
+    return data[str(eligible[-1] if eligible else keys[0])]
 
 
-def is_time_between(time_range, current_time=None):
-    """ reference: https://stackoverflow.com/a/45265202 """
-    if not current_time:
-        current_time = time.strftime('%H:%M')
-
-    try:
-        if time_range[1] < time_range[0]:
-            return current_time >= time_range[0] or current_time <= time_range[1]
-        return time_range[0] <= current_time <= time_range[1]
-    except Exception:
-        log.exception("Exception determining if current time was between the supplied range: ")
-    return True
+def is_time_between(time_range: Tuple[str, str], current_time: Optional[str] = None) -> bool:
+    """Check whether HH:MM `current_time` falls within `time_range`, which may wrap past midnight."""
+    start, end = time_range
+    current_time = current_time or time.strftime('%H:%M')
+    if end < start:
+        return current_time >= start or current_time <= end
+    return start <= current_time <= end
 
 
-def sorted_list_by_digit_asc(list_to_sort):
-    """ reference: https://stackoverflow.com/a/46772952 """
-    return sorted(list_to_sort, key=lambda x: [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', x) if s])
+def sorted_naturally(items: Iterable[str]) -> List[str]:
+    """Sort strings so embedded numbers compare numerically (sa2.json before sa10.json)."""
+    return sorted(items, key=lambda item: [int(part) if part.isdigit() else part
+                                           for part in re.split(r'(\d+)', item) if part])

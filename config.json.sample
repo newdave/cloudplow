@@ -88,7 +88,6 @@
             "can_be_throttled": true,
             "check_interval": 30,
             "exclude_open_files": true,
-            "max_size_gb": 200,
             "opened_excludes": [
                 "/downloads/"
             ],
@@ -97,9 +96,6 @@
                 "allowed_until": "08:00",
                 "enabled": false
             },
-            "size_excludes": [
-                "downloads/*"
-            ],
             "service_account_path":"/home/user/.config/cloudplow/service_accounts/",
             "mover": {
                 "enabled": false,

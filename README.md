@@ -325,7 +325,6 @@ Cloudplow has 3 main functions:
             "can_be_throttled": true,
             "check_interval": 30,
             "exclude_open_files": true,
-            "max_size_gb": 400,
             "opened_excludes": [
                 "/downloads/"
             ],
@@ -334,32 +333,22 @@ Cloudplow has 3 main functions:
                 "allowed_until": "08:00",
                 "enabled": false
             },
-            "size_excludes": [
-                "downloads/*"
-            ],
             "service_account_path":"/home/user/.config/cloudplow/service_accounts/"
         },
         "google_downloads": {
             "check_interval": 30,
             "exclude_open_files": true,
-            "max_size_gb": 400,
             "opened_excludes": [
             ],
-            "schedule": {},
-            "size_excludes": [
-            ]
+            "schedule": {}
         },
         "google_with_mover": {
             "check_interval": 30,
             "exclude_open_files": true,
-            "max_size_gb": 400,
             "opened_excludes": [
                 "/downloads/"
             ],
             "schedule": {},
-            "size_excludes": [
-                "downloads/*"
-            ],
             "service_account_path":"/home/user/.config/cloudplow/service_accounts/",
             "mover": {
                 "enabled": false,
@@ -749,7 +738,7 @@ This is the depth to min-depth to delete empty folders from relative to `upload_
 #### Local/Remote Paths
 
 
-`"upload_folder"`: is the local path that is uploaded by the `uploader` task, once it reaches the size threshold as specified in `max_size_gb`.
+`"upload_folder"`: is the local path that is uploaded by the `uploader` task every `check_interval` minutes.
 
 `"upload_remote"`: is the remote path that the `uploader` task will uploaded to.
 
@@ -771,7 +760,6 @@ If multiple uploader tasks are specified, the tasks will run sequentially (vs in
         "can_be_throttled": true,
         "check_interval": 30,
         "exclude_open_files": true,
-        "max_size_gb": 500,
         "opened_excludes": [
             "/downloads/"
         ],
@@ -780,9 +768,6 @@ If multiple uploader tasks are specified, the tasks will run sequentially (vs in
             "allowed_until": "08:00",
             "enabled": false
         },
-        "size_excludes": [
-            "downloads/*"
-        ],
         "service_account_path":"/home/user/config/cloudplow/service_accounts/"
       }
 }
@@ -792,19 +777,15 @@ In the example above, the uploader references `"google"` from the `remotes` sect
 
 `"can_be_throttled"`: When this attribute is missing or set to `true`, this uploader can be throttled if enabled in the Plex config section. When set to `false`, no throttling will be attempted on this uploader.
 
-`"check_interval"`: How often (in minutes) to check the size of this remotes `upload_folder`. Once it reaches the size threshold as specified in `max_size_gb`, the uploader will start.
+`"check_interval"`: How often (in minutes) to upload this remote's `upload_folder`. Use rclone's `--min-age` in `rclone_extras` to hold back files that are still being written.
 
 `"exclude_open_files"`: When set to `true`, open files will be excluded from the Rclone upload (i.e. upload will occur without them).
 
-`"max_size_gb"`: Maximum size (in gigabytes) before uploading can commence
-
-`"opened_excludes"`: Paths the open file checker will check for when searching for open files. In the example above, any open files with `/downloads/` in its path, would be ignored.
+`"opened_excludes"`: Paths the open file checker will check for when searching for open files. These are plain substring matches (not globs): in the example above, any open file with `/downloads/` in its path is still uploaded.
 
 `"schedule"`: Allows you to specify a time period, in 24H (HH:MM) format, for when uploads are allowed to start. Uploads in progress will not stop when `allowed_until` is reached.
 
   - This setting will not affect manual uploads, only the automatic uploader in `run` mode.
-
-`"size_excludes"`: Paths that will not be counted in the total size calculation for `max_size_gb`.
 
 `"service_account_path"`: Path that will be scanned for Google Drive service account keys (\*.json) to be used when performing upload operations.
 

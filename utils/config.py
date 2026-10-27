@@ -3,23 +3,12 @@ import json
 import logging
 import os
 import sys
-from copy import copy
+from copy import copy, deepcopy
 
 log = logging.getLogger('config')
 
 
-class Singleton(type):
-    _instances = {}
-
-    def __call__(cls, *args, **kwargs):
-        if cls not in cls._instances:
-            cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
-
-        return cls._instances[cls]
-
-
-class Config(object):
-    __metaclass__ = Singleton
+class Config:
 
     base_config = {
         # core settings
@@ -109,7 +98,7 @@ class Config(object):
 
     @property
     def default_config(self):
-        cfg = self.base_config.copy()
+        cfg = deepcopy(self.base_config)
 
         # add example remote
         cfg['remotes'] = {
@@ -151,10 +140,6 @@ class Config(object):
             'google': {
                 'can_be_throttled': True,
                 'check_interval': 30,
-                'max_size_gb': 200,
-                'size_excludes': [
-                    'downloads/*'
-                ],
                 'opened_excludes': [
                     '/downloads/'
                 ],
@@ -227,31 +212,6 @@ class Config(object):
         upgraded_settings, upgraded = self.__inner_upgrade(self.base_config, currents)
         return upgraded_settings, upgraded
 
-    def upgrade(self, cfg):
-        fields = []
-        fields_env = {}
-
-        # ENV gets priority: ENV < config.json
-        for name, data in self.base_config.items():
-            if name not in cfg:
-                cfg[name] = data
-                fields.append(name)
-
-            if name in os.environ:
-                # Use JSON decoder to get same behaviour as config file
-                fields_env[name] = json.JSONDecoder().decode(os.environ[name])
-                log.info(f"Using ENV setting {name}={fields_env[name]}")
-
-        # Only rewrite config file if new fields added
-        if len(fields):
-            log.info(f"Upgraded config. Added {len(fields)} new field(s): {fields}")
-            self.save(cfg)
-
-        # Update in-memory config with environment settings
-        cfg.update(fields_env)
-
-        return cfg
-
     def load(self):
         if not os.path.exists(self.settings['config']):
             log.warning("No config file found, creating default config.")
@@ -264,7 +224,6 @@ class Config(object):
             # Save config if upgraded
             if upgraded:
                 self.save(cfg)
-                exit(0)
             else:
                 log.debug("Config was not upgraded as there were no changes to add.")
 
@@ -272,10 +231,10 @@ class Config(object):
 
     def save(self, cfg):
         with open(self.settings['config'], 'w') as fp:
-            json.dump(cfg, fp, indent=4, sort_keys=True)
-            log.info(f"Your config was upgraded. You may check the changes here: {self.settings['config']}")
-
-        exit(0)
+            json.dump(cfg, fp, indent=2, sort_keys=True)
+            fp.write('\n')
+        log.info("Your config was upgraded. You may check the changes here: %s", self.settings['config'])
+        sys.exit(0)
 
     def get_settings(self):
         setts = {}

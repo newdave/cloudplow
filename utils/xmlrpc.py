@@ -1,25 +1,31 @@
-import socket
+from __future__ import annotations
+
 import xmlrpc.client
 
-""" referemce: https://stackoverflow.com/a/14397619 """
+
+class _TimeoutTransport(xmlrpc.client.Transport):
+    def __init__(self, timeout: float):
+        super().__init__()
+        self._timeout = timeout
+
+    def make_connection(self, host):
+        connection = super().make_connection(host)
+        connection.timeout = self._timeout
+        return connection
 
 
-class ServerProxy:
-    def __init__(self, url, timeout=10):
-        self.__url = url
-        self.__timeout = timeout
-        self.__prevDefaultTimeout = None
+class _TimeoutSafeTransport(xmlrpc.client.SafeTransport):
+    def __init__(self, timeout: float):
+        super().__init__()
+        self._timeout = timeout
 
-    def __enter__(self):
-        try:
-            if self.__timeout:
-                self.__prevDefaultTimeout = socket.getdefaulttimeout()
-                socket.setdefaulttimeout(self.__timeout)
-            proxy = xmlrpc.client.ServerProxy(self.__url, allow_none=True)
-        except Exception as ex:
-            raise Exception("Unable create XMLRPC-proxy for url '%s': %s" % (self.__url, ex))
-        return proxy
+    def make_connection(self, host):
+        connection = super().make_connection(host)
+        connection.timeout = self._timeout
+        return connection
 
-    def __exit__(self, type, value, traceback):
-        if self.__prevDefaultTimeout is None:
-            socket.setdefaulttimeout(self.__prevDefaultTimeout)
+
+def server_proxy(url: str, timeout: float = 10) -> xmlrpc.client.ServerProxy:
+    """XML-RPC proxy with a per-connection timeout (instead of mutating the global socket default)."""
+    transport_cls = _TimeoutSafeTransport if url.lower().startswith('https') else _TimeoutTransport
+    return xmlrpc.client.ServerProxy(url, transport=transport_cls(timeout), allow_none=True)

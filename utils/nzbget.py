@@ -1,29 +1,27 @@
+from __future__ import annotations
+
 import logging
+import xmlrpc.client
 
-from .xmlrpc import ServerProxy
+from .xmlrpc import server_proxy
 
-log = logging.getLogger(__name__)
+log = logging.getLogger('nzbget')
 
 
 class Nzbget:
-    def __init__(self, url):
-        self.url = f"{url}/xmlrpc"
-        self.xmlrpc = ServerProxy(self.url)
+    def __init__(self, url: str):
+        self.url = f"{url.rstrip('/')}/xmlrpc"
 
-    def pause_queue(self):
-        paused = False
-        try:
-            with self.xmlrpc as proxy:
-                paused = proxy.pausedownload()
-        except Exception:
-            log.exception("Exception pausing NzbGet queue: ")
-        return paused
+    def pause_queue(self) -> bool:
+        return self._call('pausedownload')
 
-    def resume_queue(self):
-        resumed = False
+    def resume_queue(self) -> bool:
+        return self._call('resumedownload')
+
+    def _call(self, method: str) -> bool:
         try:
-            with self.xmlrpc as proxy:
-                resumed = proxy.resumedownload()
-        except Exception:
-            log.exception("Exception resuming NzbGet queue: ")
-        return resumed
+            with server_proxy(self.url) as proxy:
+                return bool(getattr(proxy, method)())
+        except (OSError, xmlrpc.client.Error):
+            log.exception("Exception calling NzbGet %s: ", method)
+        return False

@@ -1,57 +1,29 @@
-import urllib
+from __future__ import annotations
+
+import logging
+
+import requests
+
+log = logging.getLogger('sabnzbd')
 
 
-class Sabnzbd(object):
-
-    def __init__(self, url, apikey=''):
-        self.url = url
+class Sabnzbd:
+    def __init__(self, url: str, apikey: str = ''):
+        self.url = url.rstrip('/')
         self.apikey = apikey
 
-    def request(self, mode, output=True, **kwargs):
-        kwargs['apikey'] = self.apikey
-        kwargs['mode'] = mode
+    def pause_queue(self) -> bool:
+        return self._request('pause')
 
-        if output:
-            kwargs['output'] = 'json'
-        url = f'{self.url}/api?{urllib.parse.urlencode(kwargs)}'
+    def resume_queue(self) -> bool:
+        return self._request('resume')
 
+    def _request(self, mode: str) -> bool:
+        params = {'apikey': self.apikey, 'mode': mode, 'output': 'json'}
         try:
-            result = urllib.request.urlopen(url)
-            if output:
-                print("Result is ", result.reason)
-            if mode == "pause":
-                self.paused = True
-            if mode == "resume":
-                self.resumed = True
-        except urllib.error.HTTPError as error:
-            print(f"Failed to {mode} with error code {error.code}")
-            return None
-
-    def pause_queue(self):
-        self.paused = False
-        self.request('pause')
-        return self.paused
-
-    def resume_queue(self):
-        self.resumed = False
-        self.request('resume')
-        return self.resumed
-
-# Can we use this in the furture ??
-#    def shutdown(self):
-#        self.request('shutdown')
-
-#    def status(self, advanced=False):
-#        if advanced:
-#            return self.request('status', True)
-#        else:
-#            return self.request('qstatus', True)
-
-#    def limit(self):
-#        try:
-#            return self.status(advanced=True)['limit']
-#        except:
-#            return
-
-#    def setLimit(self, value=0):
-#        self.request('config', name='speedlimit', value=value)
+            resp = requests.get(f'{self.url}/api', params=params, timeout=15)
+            resp.raise_for_status()
+            return bool(resp.json().get('status'))
+        except (requests.RequestException, ValueError):
+            log.exception("Failed to %s the Sabnzbd queue", mode)
+        return False
