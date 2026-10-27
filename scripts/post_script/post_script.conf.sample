@@ -1,0 +1,30 @@
+# Settings for scripts/post_script/post.sh. Copy to post_script.conf next to cloudplow's config.json.
+# Sourced as shell: no spaces around '='.
+
+# --- 10-tune-load: --transfers/--bwlimit for the next upload from local + NAS load ---
+# NAS to read /proc/loadavg from over SSH (key auth; leave empty to use local load only)
+NAS_SSH=""
+NAS_SSH_PORT=22
+# Private key for the NAS (recommended: a dedicated key restricted on the NAS with
+# command="cat /proc/loadavg; grep -c ^processor /proc/cpuinfo",restrict). Empty uses ssh defaults.
+NAS_SSH_KEY=""
+# Load average window in minutes: 1, 5 or 15
+TUNE_LOAD_WINDOW=5
+# "max_load_per_cpu:transfers:bwlimit" tiers, lowest first; the last one is the fallback.
+# bwlimit uses rclone units (M = MiB/s) or "off".
+TUNE_TIERS="0.50:6:off 0.80:4:off 1.20:2:200M 999:1:50M"
+# When the NAS cannot be queried: "keep" the current overrides, or "local" to use local load only
+TUNE_NAS_UNAVAILABLE=keep
+# Space-separated remotes to tune; empty tunes all
+TUNE_REMOTES=""
+
+# --- 20-healthcheck: dead man's switch ---
+# healthchecks.io-style ping URL or Uptime Kuma push URL, for every remote...
+HC_URL=""
+# ...or per remote (non-alphanumerics in the name become _), e.g.
+# HC_URL_nfs_movies="https://hc-ping.com/<uuid>"
+
+# --- 30-permissions: fix uploaded files on local destinations ---
+PERMS_WINDOW_MINUTES=120
+# "user:group" to also re-own uploaded files via passwordless sudo; empty only reports them
+PERMS_OWNER=""

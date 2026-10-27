@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Pick --transfers and --bwlimit for this remote's next upload from local and NAS load.
+#
+# Each machine's load average is divided by its CPU count; the busier of the two selects the first
+# TUNE_TIERS entry ("max_load_per_cpu:transfers:bwlimit") it is below, or the last entry. The choice
+# is written to $CLOUDPLOW_OVERRIDES_FILE, which cloudplow merges over rclone_extras next upload.
+#
+# Run as an uploader's rate_script, cloudplow also calls this every rate_script_interval seconds
+# during an upload (CLOUDPLOW_STATUS=running) and applies a changed --bwlimit to it immediately.
+set -u
+
+if [ -z "${CLOUDPLOW_POST_CONF_LOADED:-}" ]; then
+    conf=${CLOUDPLOW_POST_CONF:-${CLOUDPLOW_CONFIG_DIR:-$(dirname "$(readlink -f "$0")")/..}/post_script.conf}
+    if [ -r "$conf" ]; then
+        set -a
+        # shellcheck source=/dev/null
+        . "$conf"
+        set +a
+    fi
+fi
+
+[ -n "${CLOUDPLOW_OVERRIDES_FILE:-}" ] || { echo "CLOUDPLOW_OVERRIDES_FILE is not set"; exit 2; }
+if [ -n "${TUNE_REMOTES:-}" ] && [[ " $TUNE_REMOTES " != *" $CLOUDPLOW_REMOTE "* ]]; then
+    exit 0
+fi
+
+tiers=${TUNE_TIERS:-"0.50:6:off 0.80:4:off 1.20:2:200M 999:1:50M"}
+case ${TUNE_LOAD_WINDOW:-5} in
+    1) field=1 ;; 5) field=2 ;; 15) field=3 ;;
+    *) echo "TUNE_LOAD_WINDOW must be 1, 5 or 15"; exit 2 ;;
+esac
+
+# per_cpu LOADAVG_LINE CPUS -> load per CPU for the chosen window, or nothing if unparseable
+per_cpu() {
+    awk -v line="$1" -v cpus="$2" -v f="$field" 'BEGIN {
+        split(line, l, " ")
+        if (l[f] ~ /^[0-9.]+$/ && cpus ~ /^[0-9]+$/ && cpus > 0) printf "%.2f", l[f] / cpus
+    }'
+}
+
+local_pressure=$(per_cpu "$(cat /proc/loadavg)" "$(nproc)")
+
+nas_pressure=
+if [ -n "${NAS_SSH:-}" ]; then
+    key_args=()
+    [ -n "${NAS_SSH_KEY:-}" ] && key_args=(-i "$NAS_SSH_KEY" -o IdentitiesOnly=yes)
+    nas=$(timeout 15 ssh -p "${NAS_SSH_PORT:-22}" "${key_args[@]}" -o BatchMode=yes -o ConnectTimeout=5 \
+              "$NAS_SSH" 'cat /proc/loadavg; grep -c ^processor /proc/cpuinfo' 2>/dev/null)
+    nas_pressure=$(per_cpu "$(sed -n 1p <<<"$nas")" "$(sed -n 2p <<<"$nas")")
+    if [ -z "$nas_pressure" ]; then
+        if [ "${TUNE_NAS_UNAVAILABLE:-keep}" = keep ]; then
+            echo "NAS load unavailable from $NAS_SSH; keeping the current overrides"
+            exit 0
+        fi
+        echo "NAS load unavailable from $NAS_SSH; tuning from local load only"
+    fi
+fi
+
+read -r pressure transfers bwlimit < <(awk -v a="$local_pressure" -v b="${nas_pressure:-0}" -v tiers="$tiers" 'BEGIN {
+    p = (a + 0 > b + 0) ? a : b
+    n = split(tiers, t, " ")
+    for (i = 1; i <= n; i++) {
+        split(t[i], f, ":")
+        if (p + 0 < f[1] + 0 || i == n) { print p, f[2], f[3]; exit }
+    }
+}')
+if ! [[ ${transfers:-} =~ ^[0-9]+$ && -n ${bwlimit:-} ]]; then
+    echo "Invalid TUNE_TIERS: $tiers"
+    exit 2
+fi
+
+json=$(printf '{"--transfers": %d, "--bwlimit": "%s"}' "$transfers" "$bwlimit")
+previous=$(cat "$CLOUDPLOW_OVERRIDES_FILE" 2>/dev/null)
+summary="load/cpu (${TUNE_LOAD_WINDOW:-5}m) local ${local_pressure:-?} nas ${nas_pressure:-n/a} -> --transfers $transfers --bwlimit $bwlimit"
+if [ "$json" = "$previous" ]; then
+    # stay quiet on the periodic in-upload runs; cloudplow logs every change it applies
+    [ "${CLOUDPLOW_STATUS:-}" = running ] || echo "$summary (unchanged)"
+    exit 0
+fi
+if [ "${CLOUDPLOW_DRY_RUN:-0}" = 1 ]; then
+    echo "Dry run: $summary (not written)"
+    exit 0
+fi
+
+dir=$(dirname "$CLOUDPLOW_OVERRIDES_FILE")
+mkdir -p "$dir"
+tmp=$(mktemp "$dir/.overrides.XXXXXX") || exit 1
+printf '%s\n' "$json" > "$tmp" && mv -f "$tmp" "$CLOUDPLOW_OVERRIDES_FILE" || { rm -f "$tmp"; exit 1; }
+echo "$summary"

@@ -31,3 +31,7 @@ locks/*
 
 # Venv
 venv/*
+
+# post_script
+/post_script.conf
+/overrides/

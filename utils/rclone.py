@@ -9,7 +9,7 @@ from urllib.parse import urljoin
 
 import requests
 
-from . import process
+from . import misc, process
 from .triggers import TriggerTracker
 
 log = logging.getLogger(__name__)
@@ -248,13 +248,18 @@ class RcloneThrottler:
         transferring = (data or {}).get('transferring') or []
         if not transferring:
             return False
+        limit = misc.rate_to_bytes(speed)
+        if limit is None:
+            return False
         # throttle is considered active when total speed is within 10 MB/s of the limit
         current_speed = sum(float(transfer['speed']) for transfer in transferring)
-        return current_speed / 1000000 - 10 <= float(speed.rstrip('M'))
+        return current_speed - 10 * 1000000 <= limit
 
     def throttle(self, speed: str) -> bool:
         data = self._post('core/bwlimit', {'rate': speed})
-        if data and speed in data.get('rate', ''):
+        wanted = misc.rate_to_bytes(speed)
+        if data and (speed in data.get('rate', '') or
+                     (wanted is not None and data.get('bytesPerSecond') == int(wanted))):
             log.warning("Successfully throttled %s to %s.", self.url, speed)
             return True
         log.error("Failed to throttle %s to %s: %s", self.url, speed, data)

@@ -27,6 +27,30 @@ def seconds_to_string(seconds: float) -> str:
     return ', '.join(parts)
 
 
+_RATE = re.compile(r'^(\d+(?:\.\d+)?)([bkmgtp])?i?$', re.I)
+_RATE_UNITS = 'bkmgtp'
+
+
+def rate_to_bytes(rate: Optional[str]) -> Optional[float]:
+    """Bytes/s for a simple rclone --bwlimit rate ('100M', '512k', '1G'); None for 'off' or timetables.
+
+    Like rclone, a bare number is KiB/s and suffixes are binary multiples.
+    """
+    match = _RATE.match(str(rate).strip()) if rate is not None else None
+    if not match:
+        return None
+    number, unit = match.groups()
+    return float(number) * 1024 ** _RATE_UNITS.index((unit or 'k').lower())
+
+
+def lower_rate(rate: str, cap: Optional[str]) -> str:
+    """The slower of `rate` and `cap`; `rate` when either cannot be compared."""
+    rate_bytes, cap_bytes = rate_to_bytes(rate), rate_to_bytes(cap)
+    if rate_bytes is None or cap_bytes is None or cap is None:
+        return rate
+    return cap if cap_bytes < rate_bytes else rate
+
+
 def get_nearest_less_element(data: Mapping[str, T], num: int) -> T:
     """Return the value whose integer key is the largest one <= num (or the smallest key if none are)."""
     keys = sorted(int(key) for key in data)

@@ -12,12 +12,13 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 import schedule
 
-from utils import config, decorators, lock, logs, misc, process, version
+from utils import config, decorators, lock, logs, misc, overrides, process, version
 from utils.cache import Cache
 from utils.notifications import Notifications
 from utils.nzbget import Nzbget
 from utils.plex import Plex
 from utils.rclone import RcloneMover, RcloneThrottler
+from utils.ratelimit import RateArbiter
 from utils.sabnzbd import Sabnzbd
 from utils.syncer import Syncer
 from utils.unionfs import UnionfsHiddenFolder
@@ -39,6 +40,9 @@ class Cloudplow:
         self.configs: Dict[str, Any] = conf.configs
         self.core = self.configs['core']
         self.dry_run: bool = self.core['dry_run']
+        self.config_dir = os.path.dirname(os.path.abspath(conf.settings['config']))
+        # the running upload's --bwlimit, combined from Plex throttling and the rate_script
+        self.rates = RateArbiter()
 
         cache = Cache(conf.settings['cachefile'])
         self.uploader_bans = cache.get_cache('uploader_bans')
@@ -148,46 +152,121 @@ class Cloudplow:
             for name, uploader_config in self.configs['uploader'].items():
                 if remote and name != remote:
                     continue
+                result: Optional[UploadResult] = None
                 try:
-                    self._upload_remote(name, uploader_config)
+                    result = self._upload_remote(name, uploader_config)
                 except Exception:
                     log.exception("Exception occurred while uploading to remote: %s", name)
                     self.notify.send(f"Exception occurred while uploading to remote: {name}")
-                self._run_post_script(name, uploader_config.get('post_script', ''))
+                self._run_post_script(name, uploader_config.get('post_script', ''), result)
         log.info("Finished upload")
 
-    @staticmethod
-    def _run_post_script(name: str, script: str) -> None:
+    def _overrides_file(self, name: str) -> str:
+        return overrides.overrides_path(self.config_dir, name)
+
+    def post_script_env(self, name: str, result: Optional[UploadResult]) -> Dict[str, str]:
+        """Variables describing the finished upload; `result` is None when the upload raised."""
+        if result is None:
+            status, reason = 'error', 'Exception occurred while uploading'
+        elif result.delay_hours:
+            status, reason = 'aborted', result.trigger
+        else:
+            status, reason = ('success' if result.success else 'failed'), result.trigger
+        return self.script_env(name, status, reason)
+
+    def script_env(self, name: str, status: str, reason: str = '') -> Dict[str, str]:
+        remote = self.configs['remotes'].get(name, {})
+        return {
+            'CLOUDPLOW_REMOTE': name,
+            'CLOUDPLOW_STATUS': status,
+            'CLOUDPLOW_REASON': reason or '',
+            'CLOUDPLOW_UPLOAD_FOLDER': remote.get('upload_folder', ''),
+            'CLOUDPLOW_UPLOAD_REMOTE': remote.get('upload_remote', ''),
+            'CLOUDPLOW_CONFIG_DIR': self.config_dir,
+            'CLOUDPLOW_OVERRIDES_FILE': self._overrides_file(name),
+            'CLOUDPLOW_DRY_RUN': '1' if self.dry_run else '0',
+        }
+
+    def _run_post_script(self, name: str, script: str, result: Optional[UploadResult]) -> None:
         if not script:
             return
+        env = self.post_script_env(name, result)
+        log.info("Running post_script %r for remote: %s (status: %s)", script, name, env['CLOUDPLOW_STATUS'])
+        self._run_script('post_script', script, env)
+
+    @staticmethod
+    def _run_script(kind: str, script: str, env: Mapping[str, str]) -> bool:
         if not os.path.isfile(script):
-            log.error("post_script %r for remote %s does not exist", script, name)
-            return
-        log.info("Running post_script %r for remote: %s", script, name)
+            log.error("%s %r does not exist", kind, script)
+            return False
         try:
-            returncode = process.run([script], logs=True).returncode
+            returncode = process.stream([script], env={**os.environ, **env}, logger=log).returncode
         except OSError:
             # not executable, or no shebang line
-            log.exception("post_script %r could not be executed", script)
-            return
+            log.exception("%s %r could not be executed", kind, script)
+            return False
         log_fn = log.info if returncode == 0 else log.error
-        log_fn("post_script %r finished with exit code %d", script, returncode)
+        log_fn("%s %r finished with exit code %d", kind, script, returncode)
+        return returncode == 0
 
-    def _upload_remote(self, name: str, uploader_config: Mapping[str, Any]) -> None:
+    @contextlib.contextmanager
+    def _rate_governor(self, name: str, uploader_config: Mapping[str, Any]) -> Iterator[None]:
+        """While the upload runs, re-run its rate_script and apply the --bwlimit it chooses live."""
+        script = uploader_config.get('rate_script', '')
+        if not script:
+            yield
+            return
+        if not self.configs['plex']['enabled']:
+            log.warning("rate_script for remote %s can only change the limit of a running upload through rclone's "
+                        "remote control, which is enabled by the plex section; it applies from the next upload",
+                        name)
+            yield
+            return
+
+        stop = threading.Event()
+        interval = max(int(uploader_config.get('rate_script_interval', 60)), 10)
+        thread = threading.Thread(target=self._govern_rate, args=(name, script, interval, stop),
+                                  name='rate-governor', daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=60)
+
+    def _govern_rate(self, name: str, script: str, interval: int, stop: threading.Event) -> None:
+        throttler = RcloneThrottler(self.configs['plex']['rclone']['url'])
+        env = self.script_env(name, 'running')
+        while not stop.wait(interval):
+            if not self._run_script('rate_script', script, env) or stop.is_set():
+                continue
+            rate = overrides.load(self._overrides_file(name)).get('--bwlimit')
+            self.rates.set_load(str(rate) if rate is not None else None, throttler)
+
+    def _upload_remote(self, name: str, uploader_config: Mapping[str, Any]) -> UploadResult:
         self.notify.send(f"Upload has begun for remote: {name}")
+        remote_config = self.configs['remotes'][name]
+        tuning = overrides.load(self._overrides_file(name))
+        if tuning:
+            log.info("Applying rclone overrides for remote %s: %s", name, tuning)
+            remote_config = overrides.apply(remote_config, tuning)
+        bwlimit = remote_config.get('rclone_extras', {}).get('--bwlimit')
+        self.rates.start_upload(str(bwlimit) if bwlimit is not None else None)
+
         if uploader_config.get('can_be_throttled', True):
             self._ensure_plex_monitor()
         else:
             log.debug("Skipping check for Plex stream due to throttling disabled in remote: %s", name)
 
-        uploader = Uploader(name, uploader_config, self.configs['remotes'][name], self.core['rclone_binary_path'],
+        uploader = Uploader(name, uploader_config, remote_config, self.core['rclone_binary_path'],
                             self.core['rclone_config_path'], self.configs['plex'], self.dry_run)
 
-        with self._download_clients_paused():
+        with self._download_clients_paused(), self._rate_governor(name, uploader_config):
             if self.sa_bans.get(name) is not None:
-                self._upload_with_service_accounts(name, uploader)
+                result = self._upload_with_service_accounts(name, uploader)
             else:
-                self._handle_upload_result(name, uploader.upload())
+                result = uploader.upload()
+                self._handle_upload_result(name, result)
 
             if not self.dry_run:
                 uploader.remove_empty_dirs()
@@ -195,8 +274,9 @@ class Cloudplow:
         mover_config = uploader_config.get('mover')
         if mover_config and mover_config.get('enabled'):
             self._move(name, mover_config)
+        return result
 
-    def _upload_with_service_accounts(self, name: str, uploader: Uploader) -> None:
+    def _upload_with_service_accounts(self, name: str, uploader: Uploader) -> UploadResult:
         available = misc.sorted_naturally(
             account for account, expiry in self.sa_bans[name].items() if expiry is None)
         log.info("There is %d available service accounts", len(available))
@@ -206,7 +286,7 @@ class Cloudplow:
             log.info("Upload aborted due to the fact that no service accounts are currently unbanned and "
                      "available to use for remote %s", name)
             self.uploader_bans[name] = misc.get_lowest_remaining_time(self.sa_bans[name])
-            return
+            return UploadResult(0, 'No unbanned service accounts available', False)
 
         for index, account in enumerate(available):
             uploader.set_service_account(account)
@@ -214,7 +294,7 @@ class Cloudplow:
             if not result.delay_hours:
                 self._notify_upload_outcome(name, result.success)
                 self._set_sa_ban(name, account, None)
-                return
+                return result
 
             self._set_sa_ban(name, account, time.time() + SECONDS_PER_HOUR * result.delay_hours)
             log.debug("Setting service account %s as banned for remote: %s", account, name)
@@ -232,6 +312,7 @@ class Cloudplow:
                 self.uploader_bans[name] = unban_time
                 self.notify.send(f"Upload was aborted for remote: {name} due to trigger {result.trigger}. "
                                  f"Uploads suspended for {result.delay_hours} hours")
+        return result
 
     def _handle_upload_result(self, name: str, result: UploadResult) -> None:
         if not result.delay_hours:
@@ -461,7 +542,7 @@ class Cloudplow:
                     log.info(stream)
                 log.info("Upload throttling will now commence.")
                 throttle_speed = wanted_speed
-                throttled = rclone.throttle(throttle_speed)
+                throttled = self.rates.set_plex(throttle_speed, rclone)
                 if throttled and plex_config['notifications']:
                     self.notify.send(f"Throttled current upload to {throttle_speed} because there was "
                                      f"{stream_count} playing stream(s) on Plex")
@@ -469,7 +550,7 @@ class Cloudplow:
             elif throttled and stream_count < max_streams:
                 log.info("There was less than %d playing stream(s) on Plex Media Server while it was currently "
                          "throttled. Removing throttle ...", max_streams)
-                throttled = not rclone.no_throttle()
+                throttled = not self.rates.set_plex(None, rclone)
                 throttle_speed = None
                 if not throttled and plex_config['notifications']:
                     self.notify.send(f"Un-throttled current upload because there was less than {max_streams} "
@@ -479,7 +560,7 @@ class Cloudplow:
                 throttle_speed = wanted_speed
                 log.info("Adjusting throttle speed for current upload to %s because there was now %d playing "
                          "stream(s) on Plex Media Server", throttle_speed, stream_count)
-                throttled = rclone.throttle(throttle_speed)
+                throttled = self.rates.set_plex(throttle_speed, rclone)
                 if throttled and plex_config['notifications']:
                     self.notify.send(f"Throttle for current upload was adjusted to {throttle_speed} due to "
                                      f"{stream_count} playing stream(s) on Plex Media Server")

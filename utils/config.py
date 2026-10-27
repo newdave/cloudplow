@@ -154,6 +154,8 @@ class Config:
                 ],
                 'exclude_open_files': True,
                 'post_script': '',
+                'rate_script': '',
+                'rate_script_interval': 60,
                 'schedule': {
                     'enabled': False,
                     'allowed_from': '04:00',

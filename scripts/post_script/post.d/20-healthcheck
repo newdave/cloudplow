@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Report the upload outcome to a healthchecks.io-style or Uptime Kuma push monitor.
+#
+# The URL is HC_URL_<remote> (non-alphanumerics in the remote name become _) or HC_URL. Uploads that
+# succeeded or were deliberately aborted by a trigger count as up; failures and exceptions as down.
+set -u
+
+[ "${CLOUDPLOW_DRY_RUN:-0}" = 1 ] && exit 0
+var="HC_URL_$(printf '%s' "$CLOUDPLOW_REMOTE" | tr -c 'A-Za-z0-9_' '_')"
+url=${!var:-${HC_URL:-}}
+[ -n "$url" ] || exit 0
+
+case $CLOUDPLOW_STATUS in success|aborted) up=1 ;; *) up=0 ;; esac
+msg="$CLOUDPLOW_REMOTE $CLOUDPLOW_STATUS${CLOUDPLOW_REASON:+: $CLOUDPLOW_REASON}"
+
+case $url in
+    */api/push/*)
+        # Uptime Kuma: drop the query string the UI pre-fills, then send our own status and message
+        status=down; [ "$up" = 1 ] && status=up
+        curl -fsS -m 10 --retry 2 -o /dev/null -G "${url%%\?*}" \
+            --data-urlencode "status=$status" --data-urlencode "msg=$msg" ;;
+    *)
+        # healthchecks.io and compatible: /fail signals a failure; the body shows in the event log
+        suffix=; [ "$up" = 1 ] || suffix=/fail
+        curl -fsS -m 10 --retry 2 -o /dev/null --data-raw "$msg" "${url%/}$suffix" ;;
+esac

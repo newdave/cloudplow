@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Make files just uploaded to a local destination group-writable, and optionally re-own them.
+#
+# rclone copies the source modification time, so recently uploaded files are found by ctime (when
+# the destination inode was created) within PERMS_WINDOW_MINUTES. PERMS_OWNER="user:group" also
+# re-owns them through passwordless sudo; without it, files owned by someone else are only reported.
+set -u
+
+[ "$CLOUDPLOW_STATUS" = success ] || exit 0
+dest=$CLOUDPLOW_UPLOAD_REMOTE
+case $dest in /*) ;; *) exit 0 ;; esac  # an rclone remote such as webdav: is not a local path
+[ -d "$dest" ] || exit 0
+
+window=${PERMS_WINDOW_MINUTES:-120}
+me=$(id -un)
+act=1; [ "${CLOUDPLOW_DRY_RUN:-0}" = 1 ] && act=0
+
+if [ "$act" = 1 ]; then
+    fixed=$(find "$dest" -cmin "-$window" -user "$me" ! -perm -g+w -print -exec chmod g+w {} + | wc -l)
+else
+    fixed=$(find "$dest" -cmin "-$window" -user "$me" ! -perm -g+w -print | wc -l)
+fi
+[ "$fixed" -gt 0 ] && echo "Made $fixed recently uploaded path(s) under $dest group-writable"
+
+if [ -n "${PERMS_OWNER:-}" ]; then
+    owner_user=${PERMS_OWNER%%:*} owner_group=${PERMS_OWNER#*:}
+    wrong=$(find "$dest" -cmin "-$window" \( ! -user "$owner_user" -o ! -group "$owner_group" \) -print | wc -l)
+    if [ "$wrong" -gt 0 ] && [ "$act" = 1 ]; then
+        find "$dest" -cmin "-$window" \( ! -user "$owner_user" -o ! -group "$owner_group" \) -print0 |
+            xargs -0 -r sudo -n chown "$PERMS_OWNER" && echo "Re-owned $wrong path(s) under $dest to $PERMS_OWNER"
+    fi
+else
+    foreign=$(find "$dest" -cmin "-$window" ! -user "$me" -print | wc -l)
+    [ "$foreign" -gt 0 ] && echo "Warning: $foreign recently uploaded path(s) under $dest are not owned by $me"
+fi
+exit 0

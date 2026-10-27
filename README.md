@@ -795,7 +795,23 @@ In the example above, the uploader references `"google"` from the `remotes` sect
 
 `"service_account_path"`: Path that will be scanned for Google Drive service account keys (\*.json) to be used when performing upload operations.
 
-`"post_script"`: Path to an executable (with a shebang line) that is run after each upload to this remote finishes, whether or not the upload succeeded. Leave empty (`""`) to disable.
+`"post_script"`: Path to an executable (with a shebang line) that is run after each upload to this remote finishes, whether or not the upload succeeded. Leave empty (`""`) to disable. The script receives these environment variables:
+
+| Variable | Value |
+|---|---|
+| `CLOUDPLOW_REMOTE` | The remote name |
+| `CLOUDPLOW_STATUS` | `success`, `failed` (includes a skip because a `require_mounts` path is not mounted), `aborted` (an rclone trigger suspended the remote) or `error` (an exception occurred); `running` for a `rate_script` |
+| `CLOUDPLOW_REASON` | Why it failed or was aborted (empty on success) |
+| `CLOUDPLOW_UPLOAD_FOLDER` / `CLOUDPLOW_UPLOAD_REMOTE` | The remote's source and destination |
+| `CLOUDPLOW_OVERRIDES_FILE` | Where the script may write rclone overrides for this remote (see below) |
+| `CLOUDPLOW_CONFIG_DIR` | The folder containing `config.json` |
+| `CLOUDPLOW_DRY_RUN` | `1` in dry run mode, otherwise `0` |
+
+`scripts/post_script/post.sh` is a ready-made `post_script` that runs every executable in `scripts/post_script/post.d/`, configured by a `post_script.conf` next to `config.json` (see `post_script.conf.sample`).
+
+`"rate_script"` / `"rate_script_interval"`: An executable run every `rate_script_interval` seconds (default 60) while an upload to this remote is in progress, with `CLOUDPLOW_STATUS=running`. If the `--bwlimit` in its overrides file changes, it is applied to the running upload immediately through rclone's remote control (which the `plex` section enables). `scripts/post_script/post.d/10-tune-load` chooses `--transfers` and `--bwlimit` from the local and NAS load averages and works both as a `rate_script` and as part of `post.sh`.
+
+The overrides file (`overrides/<remote>.json` next to `config.json`) is a JSON object such as `{"--transfers": 2, "--bwlimit": "100M"}`, merged over the remote's `rclone_extras` at the start of every upload. Only `--bwlimit`, `--transfers`, `--checkers`, `--tpslimit`, `--multi-thread-streams` and `--buffer-size` are accepted. When Plex throttling is also active, the upload runs at the slower of the two limits.
 
   - This is currently not supported with sync operations.
 
