@@ -39,6 +39,8 @@
   - [Manual (CLI)](#manual-cli)
 - [Saltbox](#saltbox)
 - [Development](#development)
+  - [mise tasks](#mise-tasks)
+  - [Continuous integration](#continuous-integration)
 - [Credits](#credits)
 
 <!-- /TOC -->
@@ -953,6 +955,9 @@ To read a NAS's load, give `10-tune-load` a dedicated SSH key (`NAS_SSH_KEY`) an
 command="cat /proc/loadavg; grep -c ^processor /proc/cpuinfo",restrict ssh-ed25519 AAAA... cloudplow load probe
 ```
 
+`mise run nas:check-key` tests the key the way the service uses it, and `mise run tune:show` prints the readings and
+the tier the tuner would choose now.
+
 ## Syncer
 
 Each entry to the `syncer` corresponds to a single sync task.
@@ -1188,10 +1193,13 @@ and run `sb install cloudplow`. Saltbox clones the repo, builds a Python 3.8 vir
 
 The role checks out `master` with force, so local changes in `/opt/cloudplow` are lost on every install. Keep
 `config.json`, `post_script.conf` and `overrides/` there (they are not tracked), and commit and push anything else.
+`mise run saltbox:install` refuses to run while there are uncommitted or unpushed changes, and `mise run config:check`
+shows what the install's `update_config` would add to `config.json`.
 
 # Development
 
-Cloudplow has no build step. Set up a virtual environment as in [Installation](#installation), then run the tests from the repository root:
+Cloudplow has no build step. Set up a virtual environment as in [Installation](#installation), then run the tests from
+the repository root:
 
 ```
 venv/bin/python3 -m unittest discover -s tests
@@ -1200,17 +1208,41 @@ venv/bin/python3 -m unittest discover -s tests
 The verified-move tests run a real `rclone` and are skipped when it is not installed; run them as a regular user, since
 one of them relies on a file being unreadable.
 
-The bundled shell scripts are checked with [ShellCheck](https://www.shellcheck.net/):
+## mise tasks
 
-```
-shellcheck scripts/post_script/post.sh scripts/post_script/post.d/*
-```
+With [mise](https://mise.jdx.dev/) installed, the common jobs are tasks (`mise tasks` lists them, `mise run <task>
+--help` explains one). `mise.toml` pins the ShellCheck and actionlint versions, so local and CI results match.
 
-Both run in CI on every push and pull request, together with a coverage check: install `requirements-dev.txt` and run
-`python3 -m coverage run -m unittest discover -s tests && python3 -m coverage report` to see it locally. A pull
-request passes the `CI gate` check only if the tests pass on every supported Python, ShellCheck is clean, and total
-coverage is not lower than on the branch it targets. See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull
-request.
+| Task | What it does |
+|---|---|
+| `setup` | Create `venv/` and install the runtime and development requirements |
+| `test [names]` | Run the unit tests, all or the named ones |
+| `coverage` | Run the tests under coverage and print the report |
+| `lint` | ShellCheck every shell script and actionlint the GitHub workflows |
+| `check` | Everything CI checks: lint, tests, and no coverage drop against `origin/master` |
+| `ci:local` | Run the CI test job in Docker (`python:3.8`, unprivileged user, rclone installed) |
+| `service:status` | What cloudplow is doing: the service, an upload in progress, last results, rate limits |
+| `service:restart` | Restart the service, only when no upload is running (`--wait` to wait for one to finish) |
+| `logs` | Follow `cloudplow.log`, optionally only errors or one remote |
+| `config:check` | Show what `update_config` (run by Saltbox on every install) would change in `config.json` |
+| `saltbox:install` | Run `sb install cloudplow` after checking no work would be lost and the right repo is configured |
+| `nas:check-key` | Test the NAS SSH key the load tuner uses, the way the service runs it (no SSH agent) |
+| `tune:show` | Show the load readings and the `--transfers`/`--bwlimit` the load tuner would choose now |
+| `upstream:check` | List upstream commits not in this branch, and whether they merge cleanly |
+| `github:settings` | Enable, disable or show the GitHub settings CI relies on (see [CONTRIBUTING.md](CONTRIBUTING.md)) |
+
+## Continuous integration
+
+| Workflow | Runs | What it does |
+|---|---|---|
+| `ci.yml` | Every push to `master` and pull request | Tests under coverage on Python 3.8 (the version Saltbox installs), `mise run lint`, and the `CI gate` check that passes only when all of them do. A pull request also fails if it lowers total coverage. |
+| `upstream-sync.yml` | Mondays, or by hand | Merges new [l3uddz/cloudplow](https://github.com/l3uddz/cloudplow) commits: a clean merge becomes a pull request, a conflict an issue. |
+| `labeler.yml` | Pull requests | Labels pull requests by the files they change (`.github/labeler.yml`). |
+| `labels.yml` | Changes to `.github/labels.json` | Creates or updates the repository's labels. |
+| `stale.yml` | Daily | Marks issues and pull requests stale after 60 quiet days and closes them 14 days later. |
+
+Dependabot keeps the pip requirements and the workflows' actions up to date. See [CONTRIBUTING.md](CONTRIBUTING.md)
+before opening a pull request.
 
 | Path | Contents |
 |---|---|
@@ -1218,6 +1250,8 @@ request.
 | `utils/` | Config, rclone command building, uploader, syncers, notifications, locking, logging |
 | `scripts/post_script/` | Bundled post and rate scripts |
 | `tests/` | `unittest` suite |
+| `.mise/` | mise tasks (`tasks/`) and their shared helpers (`lib.sh`) |
+| `.github/` | Workflows, their scripts, labels and issue and pull request templates |
 | `systemd/` | Example service unit |
 
 # Credits

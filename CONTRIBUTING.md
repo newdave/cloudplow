@@ -15,8 +15,11 @@ Thanks for helping improve Cloudplow. Bug reports, fixes and features are all we
 git clone https://github.com/<your_github_username>/cloudplow
 cd cloudplow
 python3 -m venv venv
-venv/bin/pip install -r requirements.txt
+venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 ```
+
+or, with [mise](https://mise.jdx.dev/), `mise run setup`. `mise tasks` lists the other tasks; the
+[README](README.md#mise-tasks) describes them.
 
 Cloudplow supports Python 3.8 and later, so avoid syntax and standard library features newer than 3.8.
 
@@ -30,22 +33,24 @@ Cloudplow supports Python 3.8 and later, so avoid syntax and standard library fe
 
 2. Make your change, with tests in `tests/` for new behaviour or fixed bugs.
 
-3. Run the checks that CI runs:
+3. Run the checks that CI runs. With mise, one command does all of them, including the coverage comparison with
+   `master`:
 
    ```
-   venv/bin/python3 -m unittest discover -s tests
-   shellcheck scripts/post_script/post.sh scripts/post_script/post.d/*
+   mise run check
+   ```
+
+   Without mise:
+
+   ```
+   venv/bin/python3 -m coverage run -m unittest discover -s tests
+   venv/bin/python3 -m coverage report
+   shellcheck scripts/post_script/post.sh scripts/post_script/post.d/* .github/scripts/*.sh
    ```
 
    Install `rclone` and run the tests as a regular user (not root), otherwise the verified-move tests are skipped.
-
-   CI also fails a pull request that lowers total test coverage. To check it locally:
-
-   ```
-   venv/bin/pip install -r requirements-dev.txt
-   venv/bin/python3 -m coverage run -m unittest discover -s tests
-   venv/bin/python3 -m coverage report
-   ```
+   CI runs the tests on Python 3.8 only, the version Saltbox installs; `mise run ci:local` runs the same job in
+   Docker. CI also fails a pull request that lowers total test coverage.
 
 4. Update the documentation: the [README](README.md) for new or changed settings, `config.json.sample` for new
    config keys, and the `Unreleased` section of the [changelog](CHANGELOG.md).

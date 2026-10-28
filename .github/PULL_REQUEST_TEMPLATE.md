@@ -8,6 +8,7 @@
 
 ## Checklist
 
+- [ ] `mise run check` passes (or each of the three checks below)
 - [ ] `python3 -m unittest discover -s tests` passes
 - [ ] New or changed code has tests, so coverage does not drop (`python3 -m coverage report`)
 - [ ] `shellcheck scripts/post_script/post.sh scripts/post_script/post.d/*` passes (if scripts changed)

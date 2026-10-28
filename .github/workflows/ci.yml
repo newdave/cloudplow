@@ -9,30 +9,11 @@ permissions:
   contents: read
 
 jobs:
+  # one Python: 3.8, the version Saltbox builds cloudplow's venv with (code must stay 3.8-compatible anyway)
   test:
     runs-on: ubuntu-latest
-    # official images keep end-of-life Pythons available; the full image includes git, which GitPython needs
-    container: python:${{ matrix.python-version }}
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.8", "3.10", "3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends rclone
-          python -m pip install --root-user-action=ignore -r requirements.txt
-      # unprivileged, so the verified-move tests can stage an unreadable file
-      - name: Run tests
-        run: |
-          useradd --create-home tester
-          chown -R tester .
-          su tester -c "python -m unittest discover -s tests -v"
-
-  coverage:
-    runs-on: ubuntu-latest
-    container: python:3.12
+    # the official image keeps end-of-life Pythons available; the full image includes git, which GitPython needs
+    container: python:3.8
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,10 +23,11 @@ jobs:
           apt-get update && apt-get install -y --no-install-recommends rclone
           python -m pip install --root-user-action=ignore -r requirements.txt -r requirements-dev.txt
           useradd --create-home tester
-      - name: Measure coverage
+      # unprivileged, so the verified-move tests can stage an unreadable file
+      - name: Run tests with coverage
         run: |
           chown -R tester .
-          su tester -c "python -m coverage run -m unittest discover -s tests && python -m coverage json -o /tmp/head.json && python -m coverage report"
+          su tester -c "python -m coverage run -m unittest discover -s tests -v && python -m coverage json -o /tmp/head.json && python -m coverage report"
       # the base is measured with this branch's .coveragerc so both numbers count the same files
       - name: Measure base coverage
         if: github.event_name == 'pull_request'
@@ -79,7 +61,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [test, coverage, shellcheck]
+    needs: [test, shellcheck]
     runs-on: ubuntu-latest
     steps:
       - name: Require every job to pass

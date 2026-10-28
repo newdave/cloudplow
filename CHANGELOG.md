@@ -28,8 +28,12 @@ Changes are relative to [l3uddz/cloudplow](https://github.com/l3uddz/cloudplow) 
 - **`opened_files_sudo`** uploader option: run the open-file check (`lsof`) through passwordless `sudo` so files held
   open by mergerfs (root) are detected.
 - **Log redaction** of URL credentials, Plex tokens and API keys, tracebacks included.
-- A `unittest` suite, CI (tests on Python 3.8 to 3.13, ShellCheck), and the usual project files: security policy,
-  code of conduct, issue and pull request templates.
+- A `unittest` suite, CI (tests and coverage on Python 3.8, ShellCheck, actionlint, a single `CI gate` check), and
+  the usual project files: security policy, code of conduct, issue and pull request templates.
+- Repository workflows: weekly upstream sync, pull request labelling, label sync, stale issues, Dependabot.
+- **mise tasks** for development (`setup`, `test`, `coverage`, `lint`, `check`, `ci:local`) and operations
+  (`service:status`, `service:restart`, `logs`, `config:check`, `saltbox:install`, `nas:check-key`, `tune:show`,
+  `upstream:check`, `github:settings`).
 - Tests for Saltbox compatibility: its generated `config.json` and `update_config` work unchanged.
 
 ### Changed
