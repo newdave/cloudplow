@@ -57,6 +57,9 @@ Changes are relative to [l3uddz/cloudplow](https://github.com/l3uddz/cloudplow) 
 - Open-file excludes are escaped with rclone's glob syntax, so files with `[]` or `{}` in their names (all
   Radarr/Sonarr names) are actually excluded.
 - Remote (non-local) syncers crashed on schedule.
+- The Plex stream monitor logged a `Connection refused` traceback and gave up when an upload had nothing to move
+  (rclone never opened its remote control). It now waits for rclone's remote control while the upload runs and
+  exits quietly when the upload ends first.
 - Trigger-aborted uploads always suspended for 25 hours, ignoring the trigger's `sleep`.
 - The mover reported success regardless of rclone's exit code.
 - The hidden cleaner never found files, over-stripped `_HIDDEN~` names and passed `dry_run` as the Plex argument.

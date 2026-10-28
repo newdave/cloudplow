@@ -277,6 +277,10 @@ class RcloneThrottler:
         try:
             resp = requests.post(urljoin(self.url, endpoint), json=payload or {}, timeout=15)
             data = resp.json()
+        except requests.ConnectionError as error:
+            # nothing listening: rclone is not running (no upload, or it has not started yet)
+            log.debug("rclone rc endpoint %s at %s is not reachable: %s", endpoint, self.url, error)
+            return None
         except (requests.RequestException, ValueError):
             log.exception("Exception calling rclone rc endpoint %s at %s: ", endpoint, self.url)
             return None

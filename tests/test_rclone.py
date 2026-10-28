@@ -492,10 +492,13 @@ class ThrottlerTests(unittest.TestCase):
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
         throttler = RcloneThrottler(f'http://127.0.0.1:{port}/')
-        with self.assertLogs('utils.rclone', 'ERROR'):
+        # rclone not running is expected between uploads: a debug line, no traceback
+        with self.assertLogs('utils.rclone', 'DEBUG') as logs:
             self.assertFalse(throttler.validate())
-            self.assertFalse(throttler.no_throttle())
             self.assertFalse(throttler.throttle_active('10M'))
+        self.assertTrue(all(record.levelname == 'DEBUG' and not record.exc_info for record in logs.records))
+        with self.assertLogs('utils.rclone', 'ERROR'):
+            self.assertFalse(throttler.no_throttle())          # a failed un-throttle is still an error
 
     def test_throttle_active(self):
         # "active" means rclone is honouring the limit: total speed no more than 10 MB/s above it

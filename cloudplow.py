@@ -29,6 +29,7 @@ log = logging.getLogger('cloudplow')
 
 MOVER_REQUIRED_SETTINGS = ('move_from_remote', 'move_to_remote', 'rclone_extras')
 RCLONE_STARTUP_GRACE_SECONDS = 15
+RCLONE_RC_RETRY_SECONDS = 10
 SECONDS_PER_HOUR = 60 * 60
 
 
@@ -527,16 +528,22 @@ class Cloudplow:
         time.sleep(RCLONE_STARTUP_GRACE_SECONDS)
 
         rclone = RcloneThrottler(plex_config['rclone']['url'])
-        if not rclone.validate():
-            log.error("Aborting Plex Media Server stream monitor due to failure to validate supplied Rclone RC URL.")
-            return
+        upload_lock = lock.upload()
+        # rclone opens its RC port only once it runs, which may be after a pre-upload scan, or never
+        # when there is nothing to upload
+        while not rclone.validate():
+            if not upload_lock.is_locked():
+                log.info("Upload finished before Rclone RC was reachable at %s; no Plex stream monitoring needed.",
+                         plex_config['rclone']['url'])
+                return
+            log.debug("Rclone RC not reachable yet; checking again in %d seconds.", RCLONE_RC_RETRY_SECONDS)
+            time.sleep(RCLONE_RC_RETRY_SECONDS)
         log.info("Rclone RC URL was validated. Stream monitoring for Plex Media Server will now begin.")
 
         max_streams = plex_config['max_streams_before_throttle']
         speeds = plex_config['rclone']['throttle_speeds']
         throttled = False
         throttle_speed: Optional[str] = None
-        upload_lock = lock.upload()
 
         while upload_lock.is_locked():
             streams = plex.get_streams()

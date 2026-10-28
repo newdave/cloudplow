@@ -395,7 +395,8 @@ class FakeRclone:
         self.calls = []
 
     def validate(self):
-        return self.valid
+        # `valid` is a bool, or a list of results for successive calls (rclone's RC coming up late)
+        return self.valid.pop(0) if isinstance(self.valid, list) else self.valid
 
     def throttle_active(self, speed):
         return self.active
@@ -435,12 +436,24 @@ class PlexMonitorTests(unittest.TestCase):
             self.plow.plex_monitor()
         self.sleep.assert_not_called()
 
-    def test_invalid_rclone_aborts(self):
+    def test_upload_finishing_before_rclone_rc_is_up_exits_quietly(self):
+        # e.g. nothing to upload: rclone never starts, so its RC port is never opened
         self.rclone.valid = False
-        with mock.patch.object(cloudplow_module.lock, 'upload') as upload_lock, \
-                self.assertLogs('cloudplow', 'ERROR'):
+        with mock.patch.object(cloudplow_module.lock, 'upload', return_value=fake_lock(2)), \
+                self.assertLogs('cloudplow', 'DEBUG') as logs:
             self.plow.plex_monitor()
-        upload_lock.assert_not_called()
+        self.assertFalse([record for record in logs.records if record.levelno >= 30])
+        self.plex.get_streams.assert_not_called()
+        # grace period + one sleep per failed RC check while the upload was still running
+        self.assertEqual(self.sleep.call_count, 1 + 2)
+
+    def test_waits_for_rclone_rc_then_monitors(self):
+        self.rclone.valid = [False, False, True]
+        self.plex.get_streams.side_effect = [[Stream()]]
+        with mock.patch.object(cloudplow_module.lock, 'upload', return_value=fake_lock(2 + 1)):
+            self.plow.plex_monitor()
+        self.assertEqual(self.rclone.calls, ['50M'])
+        self.assertEqual(self.sleep.call_count, 1 + 2 + 1)
 
     def test_throttle_adjust_and_restore_load_limit(self):
         self.plow.rates.start_upload('45M')
