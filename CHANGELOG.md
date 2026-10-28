@@ -32,8 +32,8 @@ Changes are relative to [l3uddz/cloudplow](https://github.com/l3uddz/cloudplow) 
   the usual project files: security policy, code of conduct, issue and pull request templates.
 - Repository workflows: weekly upstream sync, pull request labelling, label sync, stale issues, Dependabot.
 - **mise tasks** for development (`setup`, `test`, `coverage`, `lint`, `check`, `ci:local`) and operations
-  (`service:status`, `service:restart`, `logs`, `config:check`, `saltbox:install`, `nas:check-key`, `tune:show`,
-  `upstream:check`, `github:settings`).
+  (`service:status`, `service:restart`, `logs`, `config:check`, `saltbox:install`, `nas:install-key`,
+  `nas:check-key`, `tune:show`, `upstream:check`, `github:settings`).
 - Tests for Saltbox compatibility: its generated `config.json` and `update_config` work unchanged.
 
 ### Changed

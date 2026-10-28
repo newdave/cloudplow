@@ -955,7 +955,9 @@ To read a NAS's load, give `10-tune-load` a dedicated SSH key (`NAS_SSH_KEY`) an
 command="cat /proc/loadavg; grep -c ^processor /proc/cpuinfo",restrict ssh-ed25519 AAAA... cloudplow load probe
 ```
 
-`mise run nas:check-key` tests the key the way the service uses it, and `mise run tune:show` prints the readings and
+`mise run nas:install-key` does this for you: it creates `NAS_SSH_KEY` if it does not exist, logs in to `NAS_SSH` with
+your usual credentials to add the restricted line (replacing any earlier line for the same key), then runs
+`nas:check-key` (`--dry-run` shows what it would change). `mise run nas:check-key` tests the key the way the service uses it, and `mise run tune:show` prints the readings and
 the tier the tuner would choose now.
 
 ## Syncer
@@ -1226,6 +1228,7 @@ With [mise](https://mise.jdx.dev/) installed, the common jobs are tasks (`mise t
 | `logs` | Follow `cloudplow.log`, optionally only errors or one remote |
 | `config:check` | Show what `update_config` (run by Saltbox on every install) would change in `config.json` |
 | `saltbox:install` | Run `sb install cloudplow` after checking no work would be lost and the right repo is configured |
+| `nas:install-key` | Create the NAS SSH key the load tuner uses and install it on the NAS, restricted to the load probe |
 | `nas:check-key` | Test the NAS SSH key the load tuner uses, the way the service runs it (no SSH agent) |
 | `tune:show` | Show the load readings and the `--transfers`/`--bwlimit` the load tuner would choose now |
 | `upstream:check` | List upstream commits not in this branch, and whether they merge cleanly |

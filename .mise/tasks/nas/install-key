@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#MISE description="Create the NAS load-probe SSH key if needed and install it on the NAS, restricted to the one command the tuner runs"
+#USAGE flag "--dry-run" help="Show the authorized_keys line and what would change, without changing anything"
+#
+# Logs in to NAS_SSH with your usual SSH credentials (agent, password) to edit its
+# ~/.ssh/authorized_keys, then tests the new key with nas:check-key.
+set -euo pipefail
+# shellcheck source=../../lib.sh
+. "${MISE_PROJECT_ROOT:-.}/.mise/lib.sh"
+load_post_conf
+[[ -n ${NAS_SSH:-} ]] || die "NAS_SSH is not set in post_script.conf"
+[[ -n ${NAS_SSH_KEY:-} ]] || die "NAS_SSH_KEY is not set in post_script.conf (e.g. NAS_SSH_KEY=\"$HOME/.ssh/cloudplow_nas_load\")"
+dry_run=${usage_dry_run:-false}
+probe='cat /proc/loadavg; grep -c ^processor /proc/cpuinfo'
+
+if [[ -e $NAS_SSH_KEY ]]; then
+    note "Using the existing key $NAS_SSH_KEY"
+elif [[ $dry_run == true ]]; then
+    note "Would create the key $NAS_SSH_KEY"
+else
+    note "Creating the key $NAS_SSH_KEY"
+    (umask 077 && mkdir -p "$(dirname "$NAS_SSH_KEY")")
+    ssh-keygen -q -t ed25519 -N "" -C "cloudplow load probe" -f "$NAS_SSH_KEY"
+fi
+
+if [[ -r $NAS_SSH_KEY.pub ]]; then
+    read -r type blob _ <"$NAS_SSH_KEY.pub"
+elif [[ -r $NAS_SSH_KEY ]]; then
+    read -r type blob _ < <(ssh-keygen -y -f "$NAS_SSH_KEY")
+else
+    type=ssh-ed25519 blob=AAAA...
+fi
+entry="command=\"$probe\",restrict $type $blob cloudplow load probe"
+
+# Replaces any earlier line for this key (e.g. an unrestricted one) rather than adding a second
+remote=$(cat <<EOF
+set -e
+umask 077
+f=\$HOME/.ssh/authorized_keys
+mkdir -p "\$HOME/.ssh"
+touch "\$f"
+if grep -qxF '$entry' "\$f"; then echo unchanged; exit 0; fi
+if grep -qF '$blob' "\$f"; then echo replaced; else echo added; fi
+[ -n "\${DRY_RUN:-}" ] && exit 0
+tmp=\$f.cloudplow.\$\$
+{ grep -vF '$blob' "\$f" || true; echo '$entry'; } >"\$tmp"
+cat "\$tmp" >"\$f"
+rm -f "\$tmp"
+EOF
+)
+[[ $dry_run == true ]] && remote="DRY_RUN=1; $remote"
+
+echo "  line: $entry"
+if [[ $blob == AAAA... ]]; then
+    note "Dry run: not contacting $NAS_SSH until the key exists"
+    exit 0
+fi
+note "Updating ~/.ssh/authorized_keys on $NAS_SSH (port ${NAS_SSH_PORT:-22}); log in if asked"
+result=$(ssh -p "${NAS_SSH_PORT:-22}" -o ConnectTimeout=10 "$NAS_SSH" sh -s <<<"$remote") ||
+    die "could not update authorized_keys on $NAS_SSH"
+case $result in
+    unchanged) echo "  ok:   the restricted key is already installed" ;;
+    replaced) echo "  ok:   $([[ $dry_run == true ]] && echo "would replace" || echo "replaced") the existing line for this key with the restricted one" ;;
+    added) echo "  ok:   $([[ $dry_run == true ]] && echo "would add" || echo "added") the restricted key" ;;
+    *) die "unexpected reply from $NAS_SSH: $result" ;;
+esac
+
+if [[ $dry_run == true ]]; then
+    note "Dry run: nothing was changed"
+    exit 0
+fi
+owner=$(stat -c %U "$NAS_SSH_KEY")
+service_user=$(systemctl show -p User --value "$(service_name 2>/dev/null || echo cloudplow)" 2>/dev/null || true)
+if [[ -n $service_user && $service_user != "$owner" ]]; then
+    echo "  WARN: $NAS_SSH_KEY belongs to $owner but the service runs as $service_user, which cannot read it"
+fi
+"$ROOT/.mise/tasks/nas/check-key"
